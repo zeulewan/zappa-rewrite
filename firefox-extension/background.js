@@ -321,6 +321,13 @@ Goals:
 - Use small safe HTML blocks only when Markdown is insufficient, such as <figure>, <img width height alt>, complex tables, or forms.
 - When using images, preserve useful width and height attributes from the source if available; avoid huge, distorted, or cropped images.
 
+Structure standard:
+- Keep the source page's high-level order: useful site/header navigation, main content, then related or supporting content.
+- Article pages should use: title, standfirst/subhead if present, byline/date if present, hero figure if useful, then the article body in source order.
+- Section/front pages should use: page or section title, useful navigation, then source sections as headings with compact lists or tables.
+- Navigation/menu bars should be reproduced as compact Markdown pipe tables of links, preserving labels and order. Prefer tables over a long vertical bullet list for horizontal menus.
+- Do not summarize or truncate core article/listing content unless the source itself is a summary.
+
 Output rules:
 - Return a JSON object only.
 - The object must contain "format":"markdown" and a string field named "content".

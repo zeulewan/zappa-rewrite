@@ -27,7 +27,11 @@ Return one JSON object only: {"format":"markdown","title":"...","content":"..."}
 The content string should be clean Markdown that the browser extension will render into static HTML.
 Do not include markdown fences, comments about the rewrite, scripts, inline event handlers, or javascript: URLs.
 Use small safe HTML blocks only when Markdown is insufficient, such as figures with image width/height, complex tables, or forms.
-Preserve useful images, captions, links, dimensions, forms, and navigation.
+Use a consistent page structure:
+- Article pages: title, standfirst/subhead if present, byline/date if present, hero figure, then article body in source order.
+- Section/front pages: page or section title, useful navigation, then source sections as headings with compact link lists or tables.
+- Navigation/menu bars: reproduce useful menus as compact Markdown pipe tables of links, preserving labels and order.
+Preserve useful images, captions, links, dimensions, forms, navigation, and article/listing structure.
 Remove ads, popups, autoplay, nag screens, tracking widgets, and distracting clutter."""
 
 
