@@ -16,6 +16,10 @@
       "background.js"
     ]
   },
+  "web_accessible_resources": [
+    "reader.html",
+    "reader.js"
+  ],
   "browser_specific_settings": {
     "gecko": {
       "id": "zappa-rewrite@nova.local",

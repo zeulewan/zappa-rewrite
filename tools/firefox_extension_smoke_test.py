@@ -295,6 +295,15 @@ def load_site_and_read_body_text(driver: webdriver.Firefox) -> str:
         )
     except TimeoutException as exc:
         raise RuntimeError("page did not finish loading") from exc
+    try:
+        wait_for_condition(
+            driver,
+            lambda: "ORIGINAL PAGE" in driver.execute_script("return document.body?.innerText || ''") or
+            "REWRITTEN PAGE" in driver.execute_script("return document.body?.innerText || ''"),
+            timeout=20,
+        )
+    except TimeoutException:
+        pass
     return driver.execute_script("return document.body?.innerText || ''")
 
 

@@ -30,6 +30,7 @@ const MAX_REWRITE_STATUSES = 8;
 const MAX_COMPLETED_REWRITE_STATUSES = 3;
 const STALE_ACTIVE_REWRITE_STATUS_MS = 120000;
 const DEV_SETTINGS_PATH = "dev-settings.json";
+const READER_PAGE = "reader.html";
 const FORCED_DEV_SETTING_KEYS = [
   "configured",
   "backend",
@@ -329,6 +330,8 @@ Output rules:
 let settingsCache = { ...DEFAULT_SETTINGS };
 let rewriteStatusesCache = [];
 const requestContexts = new Map();
+const pendingReaderNavigations = new Map();
+const readerContexts = new Map();
 
 class PassThroughResponse extends Error {}
 
@@ -344,6 +347,26 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     settingsCache[key] = change.newValue;
   }
   settingsCache = normalizeSettings(settingsCache);
+});
+
+browser.runtime.onMessage.addListener((message, sender) => {
+  if (!message || typeof message !== "object") {
+    return undefined;
+  }
+
+  if (message.type === "zappa-reader-start") {
+    startReaderRewrite(message, sender).catch((error) => {
+      console.error("zappa reader rewrite failed", error);
+    });
+    return undefined;
+  }
+
+  if (message.type === "zappa-reader-cancel") {
+    cancelReaderContext(message.id, "reader closed");
+    return undefined;
+  }
+
+  return undefined;
 });
 
 browser.webRequest.onBeforeSendHeaders.addListener(
@@ -400,6 +423,36 @@ browser.webRequest.onBeforeRequest.addListener(
     const assetKind = assetKindFromRequestType(details.type);
     if (!assetKind) {
       return;
+    }
+
+    if (details.type === "main_frame") {
+      const readerRequestId = `reader:${details.requestId}:${Date.now()}`;
+      const siteHost = getSiteHostFromDetails(details);
+      const startedAt = Date.now();
+      pendingReaderNavigations.set(readerRequestId, {
+        requestId: readerRequestId,
+        tabId: details.tabId,
+        url: details.url,
+        siteHost,
+        assetKind,
+        startedAt
+      });
+      updateRewriteStatus({
+        id: readerRequestId,
+        state: "capturing",
+        progress: 10,
+        message: "Opening reader",
+        detail: shortUrl(details.url),
+        url: details.url,
+        host: siteHost,
+        tabId: details.tabId,
+        startedAt
+      });
+      return {
+        redirectUrl: browser.runtime.getURL(
+          `${READER_PAGE}?id=${encodeURIComponent(readerRequestId)}&url=${encodeURIComponent(details.url)}`
+        )
+      };
     }
 
     const context = {
@@ -637,7 +690,223 @@ browser.tabs.onRemoved.addListener((tabId) => {
       cancelRequestContext(context.requestId, "tab closed");
     }
   }
+  for (const context of readerContexts.values()) {
+    if (context.tabId === tabId) {
+      cancelReaderContext(context.requestId, "tab closed");
+    }
+  }
 });
+
+async function startReaderRewrite(message, sender) {
+  const requestId = typeof message.id === "string" && message.id ? message.id : `reader:${Date.now()}`;
+  const pending = pendingReaderNavigations.get(requestId);
+  pendingReaderNavigations.delete(requestId);
+
+  const url = typeof message.url === "string" && isHttpUrl(message.url)
+    ? message.url
+    : pending?.url || "";
+  if (!url) {
+    await sendReaderEvent(requestId, { type: "zappa-reader-error", detail: "missing URL" });
+    return;
+  }
+
+  const tabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : (pending?.tabId ?? -1);
+  const siteHost = normalizeHost(hostnameFromUrl(url));
+  const startedAt = pending?.startedAt || Date.now();
+  const context = {
+    requestId,
+    tabId,
+    url,
+    siteHost,
+    assetKind: "html",
+    responseHeaders: [],
+    startedAt,
+    timings: {},
+    abortController: null,
+    cancelled: false,
+    cancelReason: ""
+  };
+  readerContexts.set(requestId, context);
+
+  try {
+    if (!settingsCache.enabled || !settingsCache.configured || !settingsCache.allowedHosts.includes(siteHost)) {
+      throw new PassThroughResponse("site is not enabled for rewriting");
+    }
+
+    context.timings.firstShellWriteMs = Math.max(0, Date.now() - startedAt);
+    await sendReaderEvent(requestId, { type: "zappa-reader-status", message: "Fetching page" });
+    await updateRewriteStatus({
+      id: requestId,
+      state: "capturing",
+      progress: 15,
+      message: "Fetching page",
+      detail: shortUrl(url),
+      url,
+      host: siteHost,
+      tabId,
+      timings: context.timings,
+      startedAt
+    });
+
+    const fetchStartedAt = Date.now();
+    const response = await fetch(url, {
+      credentials: "include",
+      cache: "no-store",
+      redirect: "follow",
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache"
+      },
+      signal: createRequestAbortSignal(context)
+    });
+    context.responseHeaders = headersFromFetchResponse(response);
+    const originalText = await response.text();
+    context.timings.captureMs = Date.now() - fetchStartedAt;
+
+    if (!response.ok) {
+      throw new Error(`source HTTP ${response.status}`);
+    }
+    if (!originalText.trim()) {
+      throw new Error("source response was empty");
+    }
+
+    await updateRewriteStatus({
+      id: requestId,
+      state: "queued",
+      progress: 30,
+      message: "Preparing rewrite",
+      detail: `${formatCount(originalText.length)} chars`,
+      url,
+      host: siteHost,
+      tabId,
+      sourceChars: originalText.length,
+      timings: context.timings,
+      startedAt
+    });
+    await sendReaderEvent(requestId, { type: "zappa-reader-status", message: "Rewriting" });
+
+    let streamedContentChars = 0;
+    const rewrittenText = await rewriteAsset({
+      url,
+      host: siteHost,
+      assetKind: "html",
+      contentType: getHeaderValue(context.responseHeaders, "content-type") || response.headers.get("content-type") || "",
+      source: originalText,
+      requestId,
+      startedAt,
+      timings: context.timings,
+      signal: createRequestAbortSignal(context),
+      emitReaderDocumentEnd: false,
+      onStreamStart: () => true,
+      onStreamHtml: (html) => {
+        streamedContentChars += html.length;
+        sendReaderEvent(requestId, { type: "zappa-reader-html", html }).catch((error) => {
+          console.warn("zappa reader chunk send failed", error);
+        });
+      }
+    });
+
+    if (rewrittenText?.streamed) {
+      const timings = finalizeTimings(context.timings, startedAt);
+      await updateRewriteStatus({
+        id: requestId,
+        state: "done",
+        progress: 100,
+        message: "Rewrite complete",
+        detail: `${formatCount(originalText.length)} chars -> ${formatCount(streamedContentChars)} streamed`,
+        url,
+        host: siteHost,
+        tabId,
+        sourceChars: originalText.length,
+        contentChars: streamedContentChars,
+        timings,
+        startedAt
+      });
+      await sendReaderEvent(requestId, { type: "zappa-reader-done", timings });
+      return;
+    }
+
+    const finalText = sanitizeRewrittenAsset("html", rewrittenText);
+    const timings = finalizeTimings(context.timings, startedAt);
+    await sendReaderEvent(requestId, { type: "zappa-reader-html", html: finalText });
+    await updateRewriteStatus({
+      id: requestId,
+      state: "done",
+      progress: 100,
+      message: "Rewrite complete",
+      detail: `${formatCount(originalText.length)} chars -> ${formatCount(finalText.length)} chars`,
+      url,
+      host: siteHost,
+      tabId,
+      sourceChars: originalText.length,
+      contentChars: finalText.length,
+      timings,
+      startedAt
+    });
+    await sendReaderEvent(requestId, { type: "zappa-reader-done", timings });
+  } catch (error) {
+    if (isAbortError(error) || context.cancelled) {
+      await updateRewriteStatus({
+        id: requestId,
+        state: "cancelled",
+        progress: 100,
+        message: "Rewrite cancelled",
+        detail: context.cancelReason || stringifyError(error),
+        url,
+        host: siteHost,
+        tabId,
+        timings: finalizeTimings(context.timings, startedAt),
+        startedAt
+      });
+      await sendReaderEvent(requestId, { type: "zappa-reader-error", detail: context.cancelReason || stringifyError(error) });
+      return;
+    }
+
+    await updateRewriteStatus({
+      id: requestId,
+      state: "error",
+      progress: 100,
+      message: "Rewrite failed",
+      detail: stringifyError(error),
+      url,
+      host: siteHost,
+      tabId,
+      timings: finalizeTimings(context.timings, startedAt),
+      startedAt
+    });
+    await sendReaderEvent(requestId, { type: "zappa-reader-error", detail: stringifyError(error) });
+  } finally {
+    readerContexts.delete(requestId);
+  }
+}
+
+function cancelReaderContext(requestId, reason) {
+  const context = readerContexts.get(requestId);
+  if (!context) {
+    return;
+  }
+  context.cancelled = true;
+  context.cancelReason = reason || "cancelled";
+  if (context.abortController) {
+    context.abortController.abort();
+  }
+}
+
+async function sendReaderEvent(requestId, payload) {
+  await browser.runtime.sendMessage({
+    ...payload,
+    id: requestId
+  });
+}
+
+function headersFromFetchResponse(response) {
+  const headers = [];
+  for (const [name, value] of response.headers.entries()) {
+    headers.push({ name, value });
+  }
+  return headers;
+}
 
 async function initializeSettings() {
   const devSettings = await loadDevSettings();
@@ -1051,7 +1320,20 @@ function stringifyError(error) {
   return String(error);
 }
 
-async function rewriteAsset({ url, host, assetKind, contentType, source, requestId, startedAt, timings, signal, onStreamStart, onStreamHtml }) {
+async function rewriteAsset({
+  url,
+  host,
+  assetKind,
+  contentType,
+  source,
+  requestId,
+  startedAt,
+  timings,
+  signal,
+  emitReaderDocumentEnd = true,
+  onStreamStart,
+  onStreamHtml
+}) {
   const reduceStartedAt = Date.now();
   const modelSource = prepareSourceForModel(assetKind, source, url);
   timings.reduceMs = Date.now() - reduceStartedAt;
@@ -1088,6 +1370,7 @@ async function rewriteAsset({ url, host, assetKind, contentType, source, request
     timings,
     signal,
     readerDocumentStarted,
+    emitReaderDocumentEnd,
     onStreamHtml
   });
 }
@@ -1632,7 +1915,17 @@ function htmlToPlainText(html) {
   return String(html || "").replace(/<[^>]*>/g, " ");
 }
 
-async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source, timings, signal, readerDocumentStarted = false, onStreamHtml }) {
+async function rewriteWithOpenAICompatible({
+  url,
+  assetKind,
+  contentType,
+  source,
+  timings,
+  signal,
+  readerDocumentStarted = false,
+  emitReaderDocumentEnd = true,
+  onStreamHtml
+}) {
   const headers = {
     "Content-Type": "application/json"
   };
@@ -1665,7 +1958,10 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
 
   const responseContentType = response.headers.get("content-type") || "";
   if (payload.stream && response.body && responseContentType.includes("text/event-stream")) {
-    return streamChatCompletionToHtml(response, url, timings, signal, onStreamHtml, { readerDocumentStarted });
+    return streamChatCompletionToHtml(response, url, timings, signal, onStreamHtml, {
+      readerDocumentStarted,
+      emitReaderDocumentEnd
+    });
   }
 
   const responseText = await response.text();
@@ -1689,7 +1985,14 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
   return renderModelOutput(parsed, url);
 }
 
-async function streamChatCompletionToHtml(response, pageUrl, timings, signal, onStreamHtml, { readerDocumentStarted = false } = {}) {
+async function streamChatCompletionToHtml(
+  response,
+  pageUrl,
+  timings,
+  signal,
+  onStreamHtml,
+  { readerDocumentStarted = false, emitReaderDocumentEnd = true } = {}
+) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const contentExtractor = createJsonContentExtractor((markdownDelta) => {
@@ -1779,7 +2082,9 @@ async function streamChatCompletionToHtml(response, pageUrl, timings, signal, on
   if (finalHtml) {
     onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl));
   }
-  onStreamHtml(buildReaderDocumentEnd());
+  if (emitReaderDocumentEnd) {
+    onStreamHtml(buildReaderDocumentEnd());
+  }
 
   return { streamed: true, content: rawModelText };
 }

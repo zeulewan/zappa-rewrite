@@ -1,0 +1,107 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Zappa Rewrite</title>
+    <style>
+:root {
+  color-scheme: light dark;
+  --zappa-bg: #f7f7f4;
+  --zappa-fg: #181816;
+  --zappa-muted: #686861;
+  --zappa-border: #d9d8d0;
+  --zappa-link: #175c8f;
+  --zappa-code-bg: #ecebe4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --zappa-bg: #181816;
+    --zappa-fg: #efeee7;
+    --zappa-muted: #aaa79a;
+    --zappa-border: #3d3b34;
+    --zappa-link: #8fc7ff;
+    --zappa-code-bg: #24231f;
+  }
+}
+* { box-sizing: border-box; }
+html { background: var(--zappa-bg); color: var(--zappa-fg); }
+body {
+  margin: 0;
+  font: 18px/1.58 ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  text-rendering: optimizeLegibility;
+}
+.zappa-reader {
+  width: min(100% - 32px, 760px);
+  margin: 0 auto;
+  padding: 40px 0 72px;
+}
+h1, h2, h3, h4, h5, h6 {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.18;
+  margin: 2rem 0 0.75rem;
+}
+h1 { font-size: 2.25rem; margin-top: 0; }
+h2 { font-size: 1.55rem; }
+h3 { font-size: 1.25rem; }
+p, ul, ol, blockquote, pre, table, figure, details, form { margin: 1rem 0; }
+a { color: var(--zappa-link); text-decoration-thickness: 0.08em; text-underline-offset: 0.18em; }
+img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.25rem auto;
+  border-radius: 6px;
+}
+figure { margin: 1.5rem 0; }
+figure img { margin-bottom: 0.5rem; }
+figcaption { color: var(--zappa-muted); font-size: 0.9rem; text-align: center; }
+blockquote {
+  border-left: 4px solid var(--zappa-border);
+  color: var(--zappa-muted);
+  padding-left: 1rem;
+}
+pre, code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  background: var(--zappa-code-bg);
+}
+code { border-radius: 4px; padding: 0.1rem 0.25rem; font-size: 0.92em; }
+pre { border-radius: 8px; overflow-x: auto; padding: 1rem; }
+pre code { background: transparent; padding: 0; }
+table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  width: 100%;
+}
+th, td { border-bottom: 1px solid var(--zappa-border); padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+input, select, textarea, button {
+  color: inherit;
+  font: 1rem ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  max-width: 100%;
+}
+hr { border: 0; border-top: 1px solid var(--zappa-border); margin: 2rem 0; }
+.zappa-source, .zappa-loading, .zappa-error {
+  color: var(--zappa-muted);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.95rem;
+}
+.zappa-error { color: #9c2f2f; white-space: pre-wrap; }
+.zappa-content-started .zappa-loading { display: none; }
+@media (max-width: 640px) {
+  body { font-size: 16px; }
+  .zappa-reader { width: min(100% - 24px, 760px); padding-top: 24px; }
+  h1 { font-size: 1.85rem; }
+}
+    </style>
+  </head>
+  <body>
+    <main class="zappa-reader">
+      <h1>Zappa Rewrite</h1>
+      <p class="zappa-source"><a id="source-link" rel="noreferrer"></a></p>
+      <p id="reader-status" class="zappa-loading">Opening reader...</p>
+      <div id="reader-content"></div>
+    </main>
+    <script src="reader.js"></script>
+  </body>
+</html>

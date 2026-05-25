@@ -538,6 +538,10 @@ async function getCurrentTabHost() {
   }
   try {
     const url = new URL(tab.url);
+    if (url.protocol === "moz-extension:" && url.pathname.endsWith("/reader.html")) {
+      const sourceUrl = new URL(url.searchParams.get("url") || "");
+      return sourceUrl.hostname.toLowerCase();
+    }
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       return "";
     }
