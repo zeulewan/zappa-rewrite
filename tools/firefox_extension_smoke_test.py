@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import http.server
 import json
 import os
+import re
 import socketserver
 import tempfile
 import threading
@@ -23,6 +25,9 @@ SITE_PORT = 18080
 BACKEND_PORT = 19778
 SITE_URL = f"http://127.0.0.1:{SITE_PORT}/"
 ADDON_ID = "zappa-rewrite@nova.local"
+TEST_IMAGE_BYTES = base64.b64decode(
+    "R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw=="
+)
 TEST_SITE_BODY = """<!doctype html>
 <html>
   <head>
@@ -81,6 +86,9 @@ class TestSiteHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/" or self.path.startswith("/index"):
             self._write_response(200, "text/html; charset=utf-8", TEST_SITE_BODY)
             return
+        if self.path.startswith("/images/"):
+            self._write_bytes(200, "image/gif", TEST_IMAGE_BYTES)
+            return
         self._write_response(404, "text/plain; charset=utf-8", "not found")
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
@@ -88,11 +96,14 @@ class TestSiteHandler(http.server.BaseHTTPRequestHandler):
 
     def _write_response(self, status: int, content_type: str, body: str) -> None:
         encoded = body.encode("utf-8")
+        self._write_bytes(status, content_type, encoded)
+
+    def _write_bytes(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(encoded)
+        self.wfile.write(body)
 
 
 class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
@@ -116,15 +127,21 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
             return
 
         type(self).last_source = source
-        rewritten = """# REWRITTEN PAGE
+        image_token_match = re.search(r'src="(zappa-image-\d+)"', source)
+        hero_src = image_token_match.group(1) if image_token_match else "http://127.0.0.1:18080/images/hero-large.jpg"
+        rewritten = f"""# REWRITTEN PAGE
 
-&lt;figure&gt;&lt;img src=&quot;http://127.0.0.1:18080/images/hero-large.jpg&quot; width=&quot;960&quot; height=&quot;540&quot; alt=&quot;A useful hero image&quot; /&gt;&lt;figcaption&gt;Useful image caption.&lt;/figcaption&gt;&lt;/figure&gt;
+&lt;figure&gt;&lt;img src=&quot;{hero_src}&quot; width=&quot;960&quot; height=&quot;540&quot; alt=&quot;A useful hero image&quot; /&gt;&lt;figcaption&gt;Useful image caption.&lt;/figcaption&gt;&lt;/figure&gt;
 
 ```html
     <figure><img src="http://127.0.0.1:18080/images/fenced-safe.jpg" alt="Fenced safe image" width="465" /></figure>
 ```
 
 Inline safe media: <figure><img src="http://127.0.0.1:18080/images/inline-safe.jpg" alt="Inline safe image" width="465" loading="eager"/><figcaption>Inline figure caption.</figcaption></figure>
+
+Navigation | Links
+--- | ---
+Top | [News](http://127.0.0.1:18080/news) · [Sport](http://127.0.0.1:18080/sport)
 
 Useful article text survives the reducer.
 
@@ -331,7 +348,7 @@ def assert_reduced_source(source: str) -> None:
         "Structured metadata paragraph one should survive",
         "Structured metadata paragraph two should also survive",
         "Useful image caption.",
-        "src=\"http://127.0.0.1:18080/images/hero-large.jpg\"",
+        "src=\"zappa-image-",
         "width=\"960\"",
         "height=\"540\"",
         "alt=\"A useful hero image\"",
@@ -443,6 +460,30 @@ def main() -> None:
                     raise RuntimeError(f"expected rewritten marker after allowlist, got {body_text!r}")
                 if not driver.execute_script("return Boolean(document.querySelector('main.zappa-reader style, style'))"):
                     raise RuntimeError("expected rendered Markdown document to include reader CSS")
+                try:
+                    wait_for_condition(
+                        driver,
+                        lambda: driver.execute_script(
+                            """
+                            const image = document.querySelector('main.zappa-reader img[alt="A useful hero image"]');
+                            return Boolean(image && image.complete && image.naturalWidth > 0);
+                            """
+                        ),
+                        timeout=5,
+                    )
+                except TimeoutException as exc:
+                    image_debug = driver.execute_script(
+                        """
+                        return Array.from(document.querySelectorAll('main.zappa-reader img')).map((image) => ({
+                          src: image.getAttribute('src'),
+                          alt: image.getAttribute('alt'),
+                          complete: image.complete,
+                          naturalWidth: image.naturalWidth,
+                          naturalHeight: image.naturalHeight
+                        }));
+                        """
+                    )
+                    raise RuntimeError(f"rendered image did not load pixels: {image_debug!r}") from exc
                 rendered_image = driver.execute_script(
                     """
                     const image = document.querySelector('main.zappa-reader img');
@@ -452,7 +493,9 @@ def main() -> None:
                       height: image.getAttribute('height'),
                       alt: image.getAttribute('alt'),
                       loading: image.getAttribute('loading'),
-                      decoding: image.getAttribute('decoding')
+                      decoding: image.getAttribute('decoding'),
+                      complete: image.complete,
+                      naturalWidth: image.naturalWidth
                     } : null;
                     """
                 )
@@ -461,8 +504,10 @@ def main() -> None:
                     "width": "960",
                     "height": "540",
                     "alt": "A useful hero image",
-                    "loading": "lazy",
+                    "loading": "eager",
                     "decoding": "async",
+                    "complete": True,
+                    "naturalWidth": 1,
                 }:
                     raise RuntimeError(f"rendered image lost sizing metadata: {rendered_image!r}")
                 fenced_image = driver.execute_script(
@@ -499,6 +544,13 @@ def main() -> None:
                     "loading": "eager",
                 }:
                     raise RuntimeError(f"inline safe HTML rendered as text: {inline_image!r}")
+                table_text = driver.execute_script(
+                    "return document.querySelector('main.zappa-reader table')?.innerText || ''"
+                )
+                if "Navigation" not in table_text or "News" not in table_text or "Sport" not in table_text:
+                    raise RuntimeError(f"markdown table did not render: {table_text!r}")
+                if 'src="zappa-image-' not in MockPiBridgeHandler.last_source:
+                    raise RuntimeError(f"expected model source to use image placeholders: {MockPiBridgeHandler.last_source[:1000]!r}")
                 assert_reduced_source(MockPiBridgeHandler.last_source)
                 rewrite_status = get_extension_storage(driver, extension_uuid, "rewriteStatus")
                 if not isinstance(rewrite_status, dict) or rewrite_status.get("state") != "done":

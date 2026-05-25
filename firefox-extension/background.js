@@ -320,6 +320,7 @@ Goals:
 - Use Markdown for normal prose, headings, lists, links, blockquotes, and code.
 - Use small safe HTML blocks only when Markdown is insufficient, such as <figure>, <img width height alt>, complex tables, or forms.
 - When using images, preserve useful width and height attributes from the source if available; avoid huge, distorted, or cropped images.
+- Source image URLs may be replaced with zappa-image-N placeholders. If present, copy those placeholders exactly into Markdown image URLs or safe <img> tags; do not expand, edit, or invent image URLs.
 
 Structure standard:
 - Keep the source page's high-level order: useful site/header navigation, main content, then related or supporting content.
@@ -1351,7 +1352,8 @@ async function rewriteAsset({
   onStreamHtml
 }) {
   const reduceStartedAt = Date.now();
-  const modelSource = prepareSourceForModel(assetKind, source, url);
+  const preparedSource = prepareSourceForModel(assetKind, source, url);
+  const modelSource = preparedSource.source;
   timings.reduceMs = Date.now() - reduceStartedAt;
   timings.reducedChars = modelSource.length;
   if (modelSource.length > settingsCache.maxInputChars) {
@@ -1385,6 +1387,7 @@ async function rewriteAsset({
     source: modelSource,
     timings,
     signal,
+    imageRefs: preparedSource.imageRefs,
     readerDocumentStarted,
     emitReaderDocumentEnd,
     onStreamHtml
@@ -1393,15 +1396,48 @@ async function rewriteAsset({
 
 function prepareSourceForModel(assetKind, source, url = "") {
   if (assetKind !== "html") {
-    return source;
+    return { source, imageRefs: {} };
   }
 
   const domReduced = reduceHtmlWithDom(source, url);
   if (domReduced) {
-    return domReduced;
+    return tokenizeModelImageSources(domReduced);
   }
 
-  return reduceHtmlWithRegex(source);
+  return tokenizeModelImageSources(reduceHtmlWithRegex(source));
+}
+
+function tokenizeModelImageSources(source) {
+  if (typeof DOMParser === "undefined") {
+    return { source, imageRefs: {} };
+  }
+
+  const imageRefs = {};
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(source, "text/html");
+    let nextImageRef = 0;
+    for (const image of Array.from(doc.images || [])) {
+      const src = image.getAttribute("src") || "";
+      if (!src || !isSafeReducedHtmlUrl(src)) {
+        continue;
+      }
+      const token = `zappa-image-${nextImageRef}`;
+      nextImageRef += 1;
+      imageRefs[token] = src;
+      image.setAttribute("src", token);
+    }
+    if (!nextImageRef) {
+      return { source, imageRefs };
+    }
+    return {
+      source: compactHtml(`<!doctype html>${doc.documentElement.outerHTML}`),
+      imageRefs
+    };
+  } catch (error) {
+    console.warn("zappa image tokenization failed", error);
+    return { source, imageRefs: {} };
+  }
 }
 
 function reduceHtmlWithRegex(source) {
@@ -1938,6 +1974,7 @@ async function rewriteWithOpenAICompatible({
   source,
   timings,
   signal,
+  imageRefs = {},
   readerDocumentStarted = false,
   emitReaderDocumentEnd = true,
   onStreamHtml
@@ -1975,6 +2012,7 @@ async function rewriteWithOpenAICompatible({
   const responseContentType = response.headers.get("content-type") || "";
   if (payload.stream && response.body && responseContentType.includes("text/event-stream")) {
     return streamChatCompletionToHtml(response, url, timings, signal, onStreamHtml, {
+      imageRefs,
       readerDocumentStarted,
       emitReaderDocumentEnd
     });
@@ -1998,7 +2036,7 @@ async function rewriteWithOpenAICompatible({
   if (typeof parsed.content !== "string" || !parsed.content) {
     throw new Error("OpenAI-compatible JSON output did not contain content");
   }
-  return renderModelOutput(parsed, url);
+  return renderModelOutput(parsed, url, imageRefs);
 }
 
 async function streamChatCompletionToHtml(
@@ -2007,7 +2045,7 @@ async function streamChatCompletionToHtml(
   timings,
   signal,
   onStreamHtml,
-  { readerDocumentStarted = false, emitReaderDocumentEnd = true } = {}
+  { imageRefs = {}, readerDocumentStarted = false, emitReaderDocumentEnd = true } = {}
 ) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -2021,7 +2059,7 @@ async function streamChatCompletionToHtml(
       ensureReaderDocumentStarted();
     }
     const renderStartedAt = Date.now();
-    onStreamHtml(sanitizeRenderedHtml(html, pageUrl));
+    onStreamHtml(sanitizeRenderedHtml(html, pageUrl, imageRefs));
     timings.markdownRenderMs = (timings.markdownRenderMs || 0) + (Date.now() - renderStartedAt);
   });
   let streamStarted = false;
@@ -2096,7 +2134,7 @@ async function streamChatCompletionToHtml(
     ensureReaderDocumentStarted();
   }
   if (finalHtml) {
-    onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl));
+    onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl, imageRefs));
   }
   if (emitReaderDocumentEnd) {
     onStreamHtml(buildReaderDocumentEnd());
@@ -2105,31 +2143,31 @@ async function streamChatCompletionToHtml(
   return { streamed: true, content: rawModelText };
 }
 
-function renderModelOutput(parsed, pageUrl) {
+function renderModelOutput(parsed, pageUrl, imageRefs = {}) {
   const content = parsed.content;
   const title = typeof parsed.title === "string" ? compactText(parsed.title) : "";
   const format = typeof parsed.format === "string" ? parsed.format.toLowerCase() : "";
 
   if (format === "html" || format === "html_fragment" || looksLikeHtmlDocument(content)) {
-    return renderHtmlDocument(content, { title, pageUrl });
+    return renderHtmlDocument(content, { title, pageUrl, imageRefs });
   }
 
-  return renderMarkdownDocument(content, { title, pageUrl });
+  return renderMarkdownDocument(content, { title, pageUrl, imageRefs });
 }
 
 function looksLikeHtmlDocument(content) {
   return /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(content);
 }
 
-function renderMarkdownDocument(markdown, { title = "", pageUrl = "" } = {}) {
+function renderMarkdownDocument(markdown, { title = "", pageUrl = "", imageRefs = {} } = {}) {
   const rendered = renderMarkdownToHtml(markdown);
-  const sanitized = sanitizeRenderedHtml(rendered, pageUrl);
+  const sanitized = sanitizeRenderedHtml(rendered, pageUrl, imageRefs);
   return buildReaderDocument(title || inferTitleFromRenderedHtml(sanitized), sanitized);
 }
 
-function renderHtmlDocument(html, { title = "", pageUrl = "" } = {}) {
+function renderHtmlDocument(html, { title = "", pageUrl = "", imageRefs = {} } = {}) {
   const extracted = extractHtmlBody(html);
-  const bodyHtml = sanitizeRenderedHtml(extracted.bodyHtml || html, pageUrl);
+  const bodyHtml = sanitizeRenderedHtml(extracted.bodyHtml || html, pageUrl, imageRefs);
   return buildReaderDocument(title || extracted.title || inferTitleFromRenderedHtml(bodyHtml), bodyHtml);
 }
 
@@ -2374,7 +2412,7 @@ function renderMarkdownToHtml(markdown) {
 
     if (isMarkdownTableStart(lines, index)) {
       const tableLines = [];
-      while (index < lines.length && /^\s*\|.*\|\s*$/.test(lines[index])) {
+      while (index < lines.length && splitMarkdownTableRow(lines[index])) {
         tableLines.push(lines[index]);
         index += 1;
       }
@@ -2468,23 +2506,27 @@ function isMarkdownTableStart(lines, index) {
   if (index + 1 >= lines.length) {
     return false;
   }
-  return /^\s*\|.*\|\s*$/.test(lines[index]) &&
-    /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1]);
+  const headers = splitMarkdownTableRow(lines[index]);
+  const separators = splitMarkdownTableRow(lines[index + 1]);
+  return Boolean(
+    headers &&
+    separators &&
+    headers.length >= 2 &&
+    separators.length >= 2 &&
+    separators.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
+  );
 }
 
 function renderMarkdownTable(lines) {
-  const rows = lines.map((line) => {
-    return line.trim()
-      .replace(/^\|/, "")
-      .replace(/\|$/, "")
-      .split("|")
-      .map((cell) => cell.trim());
-  });
+  const rows = lines
+    .map(splitMarkdownTableRow)
+    .filter((row) => row && row.length >= 2);
   if (rows.length < 2) {
     return "";
   }
   const headers = rows[0];
-  const bodyRows = rows.slice(2);
+  const columnCount = headers.length;
+  const bodyRows = rows.slice(2).map((row) => normalizeMarkdownTableRow(row, columnCount));
   return (
     "<table><thead><tr>" +
     headers.map((cell) => `<th>${renderMarkdownInline(cell)}</th>`).join("") +
@@ -2492,6 +2534,26 @@ function renderMarkdownTable(lines) {
     bodyRows.map((row) => `<tr>${row.map((cell) => `<td>${renderMarkdownInline(cell)}</td>`).join("")}</tr>`).join("") +
     "</tbody></table>"
   );
+}
+
+function splitMarkdownTableRow(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed || !trimmed.includes("|")) {
+    return null;
+  }
+  return trimmed
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function normalizeMarkdownTableRow(row, columnCount) {
+  const normalized = row.slice(0, columnCount);
+  while (normalized.length < columnCount) {
+    normalized.push("");
+  }
+  return normalized;
 }
 
 function renderMarkdownInline(text) {
@@ -2510,7 +2572,7 @@ function renderMarkdownInline(text) {
     const titleAttr = title ? ` title="${title}"` : "";
     return stashMarkdownToken(
       tokens,
-      `<img src="${url}" alt="${alt}"${titleAttr} loading="lazy" decoding="async">`
+      `<img src="${url}" alt="${alt}"${titleAttr} loading="eager" decoding="async">`
     );
   });
 
@@ -2541,7 +2603,7 @@ function restoreMarkdownTokens(value, tokens) {
   return value.replace(/\u0000(\d+)\u0000/g, (match, index) => tokens[Number(index)] || "");
 }
 
-function sanitizeRenderedHtml(html, pageUrl) {
+function sanitizeRenderedHtml(html, pageUrl, imageRefs = {}) {
   if (typeof DOMParser === "undefined") {
     return sanitizeRewrittenAsset("html", html);
   }
@@ -2579,11 +2641,14 @@ function sanitizeRenderedHtml(html, pageUrl) {
       }
 
       if (REDUCED_HTML_URL_ATTRS.has(name)) {
-        if (!isSafeReducedHtmlUrl(value)) {
+        const urlValue = name === "src" && tagName === "img"
+          ? restoreImageReference(value, imageRefs)
+          : value;
+        if (!isSafeReducedHtmlUrl(urlValue)) {
           node.removeAttribute(attribute.name);
           continue;
         }
-        const resolved = resolveReducedHtmlUrl(value, pageUrl);
+        const resolved = resolveReducedHtmlUrl(urlValue, pageUrl);
         if (resolved) {
           node.setAttribute(name, resolved);
         }
@@ -2599,7 +2664,7 @@ function sanitizeRenderedHtml(html, pageUrl) {
         node.remove();
       } else {
         if (!node.getAttribute("loading")) {
-          node.setAttribute("loading", "lazy");
+          node.setAttribute("loading", "eager");
         }
         if (!node.getAttribute("decoding")) {
           node.setAttribute("decoding", "async");
@@ -2616,6 +2681,14 @@ function sanitizeRenderedHtml(html, pageUrl) {
   }
 
   return doc.body.innerHTML;
+}
+
+function restoreImageReference(value, imageRefs) {
+  const trimmed = String(value || "").trim();
+  if (imageRefs && Object.hasOwn(imageRefs, trimmed)) {
+    return imageRefs[trimmed];
+  }
+  return value;
 }
 
 function rescueEscapedSafeHtmlBlocks(html) {
