@@ -1,43 +1,31 @@
 const DEFAULT_SETTINGS = {
   enabled: true,
   disabledHosts: [],
-  backend: "ollama",
-  baseUrl: "http://127.0.0.1:11434",
-  model: "qwen3:4b",
+  backend: "pi_codex",
+  baseUrl: "http://127.0.0.1:19777",
+  model: "gpt-5.4-mini",
   apiKey: "",
   maxInputChars: 80000,
   maxOutputTokens: 8192
 };
 
-const REQUEST_TYPES = ["main_frame", "sub_frame", "script", "stylesheet"];
-const OPENAI_COMPATIBLE_BACKENDS = ["openai_compatible", "codex_app_server"];
+const REQUEST_TYPES = ["main_frame", "sub_frame"];
 const CONTENT_TYPE_BY_KIND = {
-  html: "text/html; charset=utf-8",
-  css: "text/css; charset=utf-8",
-  javascript: "application/javascript; charset=utf-8"
+  html: "text/html; charset=utf-8"
 };
-const REWRITE_SCHEMA = {
-  type: "object",
-  properties: {
-    content: {
-      type: "string"
-    }
-  },
-  required: ["content"]
-};
-const SYSTEM_PROMPT = `You rewrite web assets for direct browser use.
+const SYSTEM_PROMPT = `You rewrite web pages for direct browser use.
 
 Goals:
 - Remove ads, popups, autoplay, bright distracting visual clutter, nag screens, and attention traps.
-- Preserve the page's core information architecture and functionality as much as possible.
-- Keep all URLs, forms, selectors, public APIs, and load-bearing scripts valid unless they are clearly ad or tracking related.
-- Return syntactically valid output for the requested asset kind.
+- Preserve the page's core information architecture, useful content, links, forms, and navigation as much as possible.
+- Return syntactically valid static HTML.
+- Do not include scripts, inline event handlers, javascript: URLs, or script-dependent placeholders.
 - Do not wrap the result in markdown fences.
 
 Output rules:
 - Return a JSON object only.
 - The object must contain a string field named "content".
-- "content" must be the complete rewritten asset body, not a diff or explanation.`;
+- "content" must be the complete rewritten HTML response body, not a diff or explanation.`;
 
 let settingsCache = { ...DEFAULT_SETTINGS };
 const requestContexts = new Map();
@@ -207,13 +195,10 @@ function normalizeSettings(raw) {
 }
 
 function normalizeBackend(backend) {
-  if (backend === "codex_app_server") {
-    return "codex_app_server";
-  }
   if (backend === "openai_compatible") {
     return "openai_compatible";
   }
-  return "ollama";
+  return "pi_codex";
 }
 
 function toPositiveInteger(value, fallback) {
@@ -241,12 +226,6 @@ function shouldRewriteRequest(details) {
 function assetKindFromRequestType(type) {
   if (type === "main_frame" || type === "sub_frame") {
     return "html";
-  }
-  if (type === "stylesheet") {
-    return "css";
-  }
-  if (type === "script") {
-    return "javascript";
   }
   return null;
 }
@@ -335,7 +314,14 @@ function sanitizeRewrittenAsset(assetKind, content) {
   if (assetKind !== "html") {
     return content;
   }
-  return content.replace(/\s+integrity\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+  return content
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<script\b[^>]*\/?>/gi, "")
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\s+integrity\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\s+(href|src)\s*=\s*"javascript:[^"]*"/gi, " $1=\"#\"")
+    .replace(/\s+(href|src)\s*=\s*'javascript:[^']*'/gi, " $1=\"#\"")
+    .replace(/\s+(href|src)\s*=\s*javascript:[^\s>]*/gi, " $1=\"#\"");
 }
 
 function buildErrorBody(assetKind, message) {
@@ -349,12 +335,6 @@ function buildErrorBody(assetKind, message) {
       `<pre style="white-space: pre-wrap;">${escaped}</pre>` +
       "</body></html>"
     );
-  }
-  if (assetKind === "css") {
-    return `/* zappa error: ${message} */`;
-  }
-  if (assetKind === "javascript") {
-    return `throw new Error(${JSON.stringify(`zappa error: ${message}`)});`;
   }
   return message;
 }
@@ -380,44 +360,7 @@ async function rewriteAsset({ url, assetKind, contentType, source }) {
     throw new Error(`asset too large (${source.length} > ${settingsCache.maxInputChars})`);
   }
 
-  if (settingsCache.backend === "ollama") {
-    return rewriteWithOllama({ url, assetKind, contentType, source });
-  }
-  if (OPENAI_COMPATIBLE_BACKENDS.includes(settingsCache.backend)) {
-    return rewriteWithOpenAICompatible({ url, assetKind, contentType, source });
-  }
-  throw new Error(`unknown backend: ${settingsCache.backend}`);
-}
-
-async function rewriteWithOllama({ url, assetKind, contentType, source }) {
-  const payload = {
-    model: settingsCache.model,
-    stream: false,
-    format: REWRITE_SCHEMA,
-    options: {
-      temperature: 0
-    },
-    messages: buildMessages({ url, assetKind, contentType, source })
-  };
-
-  const response = await fetchJson(`${trimTrailingSlash(settingsCache.baseUrl)}/api/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const content = response?.message?.content;
-  if (typeof content !== "string" || !content.trim()) {
-    throw new Error("Ollama did not return assistant content");
-  }
-
-  const parsed = parseModelJson(content);
-  if (typeof parsed.content !== "string" || !parsed.content) {
-    throw new Error("Ollama JSON output did not contain content");
-  }
-  return parsed.content;
+  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source });
 }
 
 async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source }) {

@@ -30,7 +30,7 @@ The Firefox extension is the main product direction. The proxy code remains as a
 
 ### Request flow
 
-1. Firefox issues a request for a page, script, or stylesheet.
+1. Firefox issues a request for a page or frame.
 2. `onBeforeSendHeaders` forces `Accept-Encoding: identity` for candidate requests.
 3. `onBeforeRequest` creates a `filterResponseData` stream filter for eligible requests.
 4. The filter buffers the full response body.
@@ -46,11 +46,11 @@ The current extension rewrites these request types:
 
 - `main_frame`
 - `sub_frame`
-- `script`
-- `stylesheet`
 
 The current extension does not rewrite:
 
+- scripts
+- stylesheets
 - images
 - fonts
 - XHR or fetch bodies
@@ -73,6 +73,10 @@ Current fields:
 - `maxOutputTokens`
 
 `background.js` keeps an in-memory cache synchronized with storage change events so each request does not need to re-read storage.
+
+### JavaScript-free output
+
+The browser-side path is intentionally HTML-only. The prompt forbids scripts, and `background.js` strips script tags, inline event handlers, `javascript:` URLs, and stale integrity attributes from rewritten HTML before writing the response.
 
 ### Per-site disable behavior
 

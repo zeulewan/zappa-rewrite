@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "Zappa Rewrite",
   "version": "0.1.0",
-  "description": "Rewrite HTML, CSS, and JavaScript in Firefox through a local or remote LLM backend.",
+  "description": "Rewrite HTML pages in Firefox through a local or remote LLM backend.",
   "permissions": [
     "storage",
     "tabs",

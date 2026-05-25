@@ -19,7 +19,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION_DIR = ROOT / "firefox-extension"
 SITE_PORT = 18080
-BACKEND_PORT = 11434
+BACKEND_PORT = 19777
 SITE_URL = f"http://127.0.0.1:{SITE_PORT}/"
 ADDON_ID = "zappa-rewrite@nova.local"
 FIREFOX_BINARY_CANDIDATES = [
@@ -42,21 +42,13 @@ class TestSiteHandler(http.server.BaseHTTPRequestHandler):
   <head>
     <meta charset="utf-8">
     <title>zappa smoke test</title>
-    <link rel="stylesheet" href="/app.css">
   </head>
   <body>
     <h1 id="marker">ORIGINAL PAGE</h1>
-    <script src="/app.js"></script>
   </body>
 </html>
 """
             self._write_response(200, "text/html; charset=utf-8", body)
-            return
-        if self.path == "/app.css":
-            self._write_response(200, "text/css; charset=utf-8", "body{background:#fafafa}")
-            return
-        if self.path == "/app.js":
-            self._write_response(200, "application/javascript; charset=utf-8", "window.pageScript='ORIGINAL SCRIPT';")
             return
         self._write_response(404, "text/plain; charset=utf-8", "not found")
 
@@ -72,9 +64,9 @@ class TestSiteHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-class MockOllamaHandler(http.server.BaseHTTPRequestHandler):
+class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/api/chat":
+        if self.path != "/chat/completions":
             self._write_json(404, {"error": "not found"})
             return
 
@@ -86,23 +78,26 @@ class MockOllamaHandler(http.server.BaseHTTPRequestHandler):
         asset_kind = request_data["asset_kind"]
         source = request_data["source"]
 
-        if asset_kind == "html":
-            rewritten = source.replace("ORIGINAL PAGE", "REWRITTEN PAGE")
-        elif asset_kind == "javascript":
-            rewritten = source.replace("ORIGINAL SCRIPT", "REWRITTEN SCRIPT")
-        elif asset_kind == "css":
-            rewritten = source.replace("#fafafa", "#d9f2e6")
-        else:
-            rewritten = source
+        if asset_kind != "html":
+            self._write_json(400, {"error": f"unexpected asset kind: {asset_kind}"})
+            return
+
+        rewritten = source.replace("ORIGINAL PAGE", "REWRITTEN PAGE")
 
         self._write_json(
             200,
             {
                 "model": payload.get("model", "mock"),
-                "message": {
-                    "role": "assistant",
-                    "content": json.dumps({"content": rewritten}),
-                },
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"content": rewritten}),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
             },
         )
 
@@ -189,7 +184,7 @@ def load_site_and_read_marker(driver: webdriver.Firefox) -> str:
 
 def main() -> None:
     print("Starting mock backend and local test site...")
-    with run_server(MockOllamaHandler, BACKEND_PORT), run_server(TestSiteHandler, SITE_PORT):
+    with run_server(MockPiBridgeHandler, BACKEND_PORT), run_server(TestSiteHandler, SITE_PORT):
         with tempfile.TemporaryDirectory(prefix="zappa-firefox-build-") as build_tmp:
             build_dir = Path(build_tmp)
             xpi_path = build_xpi(build_dir)

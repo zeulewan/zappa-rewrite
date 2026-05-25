@@ -28,7 +28,7 @@ Using a mock backend makes the result:
 
 - deterministic
 - fast
-- independent of Ollama setup
+- independent of Pi/Codex login, network, and model latency
 - independent of model quality or timeout behavior
 
 ## Test harness
@@ -39,7 +39,7 @@ The harness lives at:
 
 It does the following:
 
-1. starts a local mock Ollama-compatible server on `127.0.0.1:11434`
+1. starts a local mock Pi bridge backend on `127.0.0.1:19777`
 2. starts a local test site on `127.0.0.1:18080`
 3. packages the extension into a temporary `.xpi`
 4. launches Firefox through Selenium and geckodriver
@@ -91,14 +91,13 @@ Without that flag, Selenium's chrome-context access was blocked.
 ## What is not covered by the smoke test
 
 - visual correctness of the popup UI
-- real Ollama latency and failure modes
+- real Pi + Codex latency and failure modes
 - live-site correctness
-- script-heavy sites with complex CSP or framework bundling
+- script-heavy sites that require JavaScript for core rendering
 - model quality under long asset bodies
 
 ## Suggested next tests
 
-- run against a real Ollama backend
+- run against a real Pi + Codex bridge
 - automate popup UI clicks directly
-- add assertions for stylesheet and script rewrites, not just the HTML marker
 - add failure-path tests where the backend returns invalid JSON or a timeout

@@ -1,9 +1,9 @@
 const DEFAULT_SETTINGS = {
   enabled: true,
   disabledHosts: [],
-  backend: "ollama",
-  baseUrl: "http://127.0.0.1:11434",
-  model: "qwen3:4b",
+  backend: "pi_codex",
+  baseUrl: "http://127.0.0.1:19777",
+  model: "gpt-5.4-mini",
   apiKey: "",
   maxInputChars: 80000,
   maxOutputTokens: 8192
@@ -158,13 +158,10 @@ function normalizeSettings(raw) {
 }
 
 function normalizeBackend(backend) {
-  if (backend === "codex_app_server") {
-    return "codex_app_server";
-  }
   if (backend === "openai_compatible") {
     return "openai_compatible";
   }
-  return "ollama";
+  return "pi_codex";
 }
 
 function normalizeHost(host) {
