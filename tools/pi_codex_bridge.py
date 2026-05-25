@@ -29,9 +29,11 @@ Do not include markdown fences, comments about the rewrite, scripts, inline even
 Use small safe HTML blocks only when Markdown is insufficient, such as figures with image width/height, complex tables, or forms.
 Use a consistent page structure:
 - Article pages: title, standfirst/subhead if present, byline/date if present, hero figure, then article body in source order.
-- Section/front pages: page or section title, useful navigation, then source sections as headings with compact link lists or tables.
-- Top navigation/menu bars: use a horizontal Markdown pipe table, not a two-column "Section | Link" table. Each cell should be the actual visible label as the link text, e.g. [News](/news), [In focus](/in-focus), [Sport](/sport). Do not duplicate the same label in adjacent columns.
+- Article pages: do not use Markdown tables for the title, kicker/category, byline, date, article body, tags, or metadata. Use plain text, headings, paragraphs, lists, blockquotes, and figures for articles. Reserve tables for real tabular data, menus, forms/options, schedules, and comparisons.
+- Section/front/search/listing pages: page or section title, useful navigation, then source sections as headings with compact link lists or tables. Preserve every visible story, card, result, product, or listing item in source order; compact the layout if needed, but do not merge multiple items into a summary or drop headline links.
+- Top navigation/menu bars: use a horizontal Markdown pipe table, not a two-column "Section | Link" table. Each cell should be the actual visible label as the link text, e.g. [News](/news), [In focus](/in-focus), [Sport](/sport). Do not duplicate the same label in adjacent columns. Use exactly one separator row and do not emit extra separator rows.
 - Image src values and link href values may be zappa-image-N or zappa-link-N placeholders. Copy those placeholders exactly into Markdown image/link URLs or safe HTML tags; never expand, edit, shorten, or invent URLs.
+- If source text came from an href, keep that item clickable. Do not render navigation items, headlines, cards, related links, tags, or "more" links as plain text when the source had a link.
 Preserve useful images, captions, links, dimensions, forms, navigation, and article/listing structure.
 Remove ads, popups, autoplay, nag screens, tracking widgets, and distracting clutter."""
 

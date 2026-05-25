@@ -135,11 +135,14 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
         type(self).last_source = source
         image_token_match = re.search(r'src="(zappa-image-\d+)"', source)
         hero_src = image_token_match.group(1) if image_token_match else "http://127.0.0.1:18080/images/hero-large.jpg"
-        link_tokens = re.findall(r'href="(zappa-link-\d+)"', source)
-        news_href = link_tokens[0] if len(link_tokens) > 0 else "http://127.0.0.1:18080/news"
-        focus_href = link_tokens[1] if len(link_tokens) > 1 else "http://127.0.0.1:18080/in-focus"
-        sport_href = link_tokens[2] if len(link_tokens) > 2 else "http://127.0.0.1:18080/sport"
-        main_href = link_tokens[3] if len(link_tokens) > 3 else "http://127.0.0.1:18080/world/2026/may/25/iran-denies-deal-us-imminent-israel-oman-strait-of-hormuz"
+        def token_for_label(label: str, fallback: str) -> str:
+            match = re.search(rf'href="(zappa-link-\d+)">{re.escape(label)}<', source)
+            return match.group(1) if match else fallback
+
+        main_href = token_for_label(
+            "Iran denies deal with US is imminent despite some progress",
+            "http://127.0.0.1:18080/world/2026/may/25/iran-denies-deal-us-imminent-israel-oman-strait-of-hormuz",
+        )
         rewritten = f"""# REWRITTEN PAGE
 
 &lt;figure&gt;&lt;img src=&quot;{hero_src}&quot; width=&quot;960&quot; height=&quot;540&quot; alt=&quot;A useful hero image&quot; /&gt;&lt;figcaption&gt;Useful image caption.&lt;/figcaption&gt;&lt;/figure&gt;
@@ -150,8 +153,16 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
 
 Inline safe media: <figure><img src="http://127.0.0.1:18080/images/inline-safe.jpg" alt="Inline safe image" width="465" loading="eager"/><figcaption>Inline figure caption.</figcaption></figure>
 
-| [News]({news_href}) | [In focus]({focus_href}) | [Sport]({sport_href}) |
+| Article kicker |
+| --- |
+
+| News | In focus | Sport |
+
+| News | In focus | Sport |
 | --- | --- | --- |
+| --- | --- | --- |
+
+News In focus Sport
 
 [Iran denies deal with US is imminent despite some progress]({main_href})
 
@@ -472,6 +483,10 @@ def main() -> None:
                 body_text = load_site_and_read_body_text(driver)
                 if "REWRITTEN PAGE" not in body_text:
                     raise RuntimeError(f"expected rewritten marker after allowlist, got {body_text!r}")
+                if "| Article kicker |" in body_text or "| --- |" in body_text or "Article kicker" not in body_text:
+                    raise RuntimeError(f"malformed single-column table was not normalized: {body_text[:300]!r}")
+                if "| News | In focus | Sport |" in body_text:
+                    raise RuntimeError(f"loose pipe menu row rendered as raw text: {body_text[:300]!r}")
                 if not driver.execute_script("return Boolean(document.querySelector('main.zappa-reader style, style'))"):
                     raise RuntimeError("expected rendered Markdown document to include reader CSS")
                 try:
@@ -563,7 +578,8 @@ def main() -> None:
                 )
                 table_links = driver.execute_script(
                     """
-                    return Array.from(document.querySelectorAll('main.zappa-reader table a')).map((link) => ({
+                    const table = document.querySelector('main.zappa-reader table');
+                    return Array.from(table ? table.querySelectorAll('a') : []).map((link) => ({
                       text: link.textContent,
                       href: link.href
                     }));
@@ -574,8 +590,17 @@ def main() -> None:
                     {"text": "In focus", "href": "http://127.0.0.1:18080/in-focus"},
                     {"text": "Sport", "href": "http://127.0.0.1:18080/sport"},
                 ]
-                if table_links != expected_table_links:
+                if "---" in table_text or table_links != expected_table_links:
                     raise RuntimeError(f"horizontal markdown menu table did not render: text={table_text!r} links={table_links!r}")
+                paragraph_nav_links = driver.execute_script(
+                    """
+                    return Array.from(document.querySelectorAll('main.zappa-reader p')).map((paragraph) =>
+                      Array.from(paragraph.querySelectorAll('a')).map((link) => link.textContent)
+                    ).find((links) => links.join('|') === 'News|In focus|Sport') || [];
+                    """
+                )
+                if paragraph_nav_links != ["News", "In focus", "Sport"]:
+                    raise RuntimeError(f"plain nav label row was not linkified: {paragraph_nav_links!r}")
                 main_story_href = driver.execute_script(
                     """
                     return document.querySelector('main.zappa-reader a[href$="/world/2026/may/25/iran-denies-deal-us-imminent-israel-oman-strait-of-hormuz"]')?.href || '';

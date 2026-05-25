@@ -321,13 +321,15 @@ Goals:
 - Use small safe HTML blocks only when Markdown is insufficient, such as <figure>, <img width height alt>, complex tables, or forms.
 - When using images, preserve useful width and height attributes from the source if available; avoid huge, distorted, or cropped images.
 - Source image URLs and link URLs may be replaced with zappa-image-N or zappa-link-N placeholders. If present, copy those placeholders exactly into Markdown image/link URLs or safe HTML tags; do not expand, edit, shorten, or invent URLs.
+- When source text came from an <a href>, the rewritten text for that item must remain a clickable Markdown link. Do not render navigation items, headlines, cards, related links, tags, or "more" links as plain text if the source had an href.
 
 Structure standard:
 - Keep the source page's high-level order: useful site/header navigation, main content, then related or supporting content.
 - Article pages should use: title, standfirst/subhead if present, byline/date if present, hero figure if useful, then the article body in source order.
-- Section/front pages should use: page or section title, useful navigation, then source sections as headings with compact lists or tables.
+- Article pages should not use Markdown tables for the title, kicker/category, byline, date, article body, tags, or metadata. Use plain text, headings, paragraphs, lists, blockquotes, and figures for articles. Reserve tables for real tabular data, menus, forms/options, schedules, and comparisons.
+- Section/front/search/listing pages should use: page or section title, useful navigation, then source sections as headings with compact lists or tables. Preserve every visible story, card, result, product, or listing item in source order; compact the layout if needed, but do not merge multiple items into a summary or drop headline links.
 - Top navigation/menu bars should be reproduced as a horizontal Markdown pipe table, not a two-column "Section | Link" table. Each cell should be the actual visible label as the link text, such as [News](/news), [In focus](/in-focus), [Sport](/sport). Do not duplicate the same label in adjacent columns.
-- For horizontal menus, prefer this shape: | [News](/news) | [In focus](/in-focus) | [Sport](/sport) | followed by | --- | --- | --- |. Preserve source label order.
+- For horizontal menus, prefer this shape: | [News](/news) | [In focus](/in-focus) | [Sport](/sport) | followed by one separator row: | --- | --- | --- |. Preserve source label order. Do not emit extra separator rows.
 - Do not summarize or truncate core article/listing content unless the source itself is a summary.
 
 Output rules:
@@ -1390,6 +1392,7 @@ async function rewriteAsset({
     signal,
     imageRefs: preparedSource.imageRefs,
     linkRefs: preparedSource.linkRefs,
+    linkLabels: preparedSource.linkLabels,
     readerDocumentStarted,
     emitReaderDocumentEnd,
     onStreamHtml
@@ -1398,7 +1401,7 @@ async function rewriteAsset({
 
 function prepareSourceForModel(assetKind, source, url = "") {
   if (assetKind !== "html") {
-    return { source, imageRefs: {}, linkRefs: {} };
+    return { source, imageRefs: {}, linkRefs: {}, linkLabels: {} };
   }
 
   const domReduced = reduceHtmlWithDom(source, url);
@@ -1411,11 +1414,12 @@ function prepareSourceForModel(assetKind, source, url = "") {
 
 function tokenizeModelUrlSources(source) {
   if (typeof DOMParser === "undefined") {
-    return { source, imageRefs: {}, linkRefs: {} };
+    return { source, imageRefs: {}, linkRefs: {}, linkLabels: {} };
   }
 
   const imageRefs = {};
   const linkRefs = {};
+  const linkLabels = {};
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(source, "text/html");
@@ -1439,19 +1443,24 @@ function tokenizeModelUrlSources(source) {
       const token = `zappa-link-${nextLinkRef}`;
       nextLinkRef += 1;
       linkRefs[token] = href;
+      const label = compactText(link.textContent || link.getAttribute("aria-label") || link.getAttribute("title") || "");
+      if (label && !Object.hasOwn(linkLabels, label)) {
+        linkLabels[label] = href;
+      }
       link.setAttribute("href", token);
     }
     if (!nextImageRef && !nextLinkRef) {
-      return { source, imageRefs, linkRefs };
+      return { source, imageRefs, linkRefs, linkLabels };
     }
     return {
       source: compactHtml(`<!doctype html>${doc.documentElement.outerHTML}`),
       imageRefs,
-      linkRefs
+      linkRefs,
+      linkLabels
     };
   } catch (error) {
     console.warn("zappa URL tokenization failed", error);
-    return { source, imageRefs: {}, linkRefs: {} };
+    return { source, imageRefs: {}, linkRefs: {}, linkLabels: {} };
   }
 }
 
@@ -1490,6 +1499,7 @@ function reduceHtmlWithDom(source, pageUrl) {
     const structuredArticle = extractStructuredArticle(doc);
     normalizePictures(doc);
     hydrateImages(doc);
+    const navigationSupplement = renderUsefulNavigationSupplement(doc, pageUrl);
     removeReducedHtmlNoise(doc);
     trimOverlongNavigation(doc);
     materializeMeaningfulEmptyLinks(doc);
@@ -1499,6 +1509,9 @@ function reduceHtmlWithDom(source, pageUrl) {
 
     const title = compactText(doc.title || "");
     let bodyHtml = serializeReducedHtmlBody(doc);
+    if (navigationSupplement) {
+      bodyHtml = `${navigationSupplement}\n${bodyHtml}`;
+    }
     if (structuredArticle && shouldAppendStructuredArticle(bodyHtml, structuredArticle.body)) {
       bodyHtml = `${bodyHtml}\n${renderStructuredArticleSupplement(structuredArticle)}`;
     }
@@ -1726,6 +1739,46 @@ function trimOverlongNavigation(doc) {
       nav.remove();
     }
   }
+}
+
+function renderUsefulNavigationSupplement(doc, pageUrl) {
+  const links = [];
+  const seen = new Set();
+  const candidates = Array.from(doc.querySelectorAll("header a[href], nav a[href], [role=\"navigation\"] a[href]"));
+  for (const link of candidates) {
+    const label = compactText(link.textContent || link.getAttribute("aria-label") || link.getAttribute("title") || "");
+    const href = link.getAttribute("href") || "";
+    if (!isUsefulNavigationLinkLabel(label) || !isSafeReducedHtmlUrl(href)) {
+      continue;
+    }
+    const resolved = resolveReducedHtmlUrl(href, pageUrl);
+    if (!resolved) {
+      continue;
+    }
+    const key = `${label}\n${resolved}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    links.push({ label, href: resolved });
+    if (links.length >= REDUCED_HTML_MAX_NAV_LINKS) {
+      break;
+    }
+  }
+  if (links.length < 3) {
+    return "";
+  }
+  return `<nav aria-label="Site navigation">${links.map((link) => {
+    return `<a href="${escapeHtml(link.href)}">${escapeHtml(link.label)}</a>`;
+  }).join(" ")}</nav>`;
+}
+
+function isUsefulNavigationLinkLabel(label) {
+  const normalized = compactText(label).toLowerCase();
+  if (!normalized || normalized.length > 36 || normalized.split(/\s+/).length > 4) {
+    return false;
+  }
+  return !/\b(?:account|edition|jobs?|log in|login|print|register|search|sign in|subscribe|subscription|support|skip to)\b/i.test(normalized);
 }
 
 function materializeMeaningfulEmptyLinks(doc) {
@@ -2004,6 +2057,7 @@ async function rewriteWithOpenAICompatible({
   signal,
   imageRefs = {},
   linkRefs = {},
+  linkLabels = {},
   readerDocumentStarted = false,
   emitReaderDocumentEnd = true,
   onStreamHtml
@@ -2043,6 +2097,7 @@ async function rewriteWithOpenAICompatible({
     return streamChatCompletionToHtml(response, url, timings, signal, onStreamHtml, {
       imageRefs,
       linkRefs,
+      linkLabels,
       readerDocumentStarted,
       emitReaderDocumentEnd
     });
@@ -2066,7 +2121,7 @@ async function rewriteWithOpenAICompatible({
   if (typeof parsed.content !== "string" || !parsed.content) {
     throw new Error("OpenAI-compatible JSON output did not contain content");
   }
-  return renderModelOutput(parsed, url, { imageRefs, linkRefs });
+  return renderModelOutput(parsed, url, { imageRefs, linkRefs, linkLabels });
 }
 
 async function streamChatCompletionToHtml(
@@ -2075,7 +2130,7 @@ async function streamChatCompletionToHtml(
   timings,
   signal,
   onStreamHtml,
-  { imageRefs = {}, linkRefs = {}, readerDocumentStarted = false, emitReaderDocumentEnd = true } = {}
+  { imageRefs = {}, linkRefs = {}, linkLabels = {}, readerDocumentStarted = false, emitReaderDocumentEnd = true } = {}
 ) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -2089,7 +2144,7 @@ async function streamChatCompletionToHtml(
       ensureReaderDocumentStarted();
     }
     const renderStartedAt = Date.now();
-    onStreamHtml(sanitizeRenderedHtml(html, pageUrl, { imageRefs, linkRefs }));
+    onStreamHtml(sanitizeRenderedHtml(html, pageUrl, { imageRefs, linkRefs, linkLabels }));
     timings.markdownRenderMs = (timings.markdownRenderMs || 0) + (Date.now() - renderStartedAt);
   });
   let streamStarted = false;
@@ -2164,7 +2219,7 @@ async function streamChatCompletionToHtml(
     ensureReaderDocumentStarted();
   }
   if (finalHtml) {
-    onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl, { imageRefs, linkRefs }));
+    onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl, { imageRefs, linkRefs, linkLabels }));
   }
   if (emitReaderDocumentEnd) {
     onStreamHtml(buildReaderDocumentEnd());
@@ -2173,31 +2228,31 @@ async function streamChatCompletionToHtml(
   return { streamed: true, content: rawModelText };
 }
 
-function renderModelOutput(parsed, pageUrl, { imageRefs = {}, linkRefs = {} } = {}) {
+function renderModelOutput(parsed, pageUrl, { imageRefs = {}, linkRefs = {}, linkLabels = {} } = {}) {
   const content = parsed.content;
   const title = typeof parsed.title === "string" ? compactText(parsed.title) : "";
   const format = typeof parsed.format === "string" ? parsed.format.toLowerCase() : "";
 
   if (format === "html" || format === "html_fragment" || looksLikeHtmlDocument(content)) {
-    return renderHtmlDocument(content, { title, pageUrl, imageRefs, linkRefs });
+    return renderHtmlDocument(content, { title, pageUrl, imageRefs, linkRefs, linkLabels });
   }
 
-  return renderMarkdownDocument(content, { title, pageUrl, imageRefs, linkRefs });
+  return renderMarkdownDocument(content, { title, pageUrl, imageRefs, linkRefs, linkLabels });
 }
 
 function looksLikeHtmlDocument(content) {
   return /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(content);
 }
 
-function renderMarkdownDocument(markdown, { title = "", pageUrl = "", imageRefs = {}, linkRefs = {} } = {}) {
+function renderMarkdownDocument(markdown, { title = "", pageUrl = "", imageRefs = {}, linkRefs = {}, linkLabels = {} } = {}) {
   const rendered = renderMarkdownToHtml(markdown);
-  const sanitized = sanitizeRenderedHtml(rendered, pageUrl, { imageRefs, linkRefs });
+  const sanitized = sanitizeRenderedHtml(rendered, pageUrl, { imageRefs, linkRefs, linkLabels });
   return buildReaderDocument(title || inferTitleFromRenderedHtml(sanitized), sanitized);
 }
 
-function renderHtmlDocument(html, { title = "", pageUrl = "", imageRefs = {}, linkRefs = {} } = {}) {
+function renderHtmlDocument(html, { title = "", pageUrl = "", imageRefs = {}, linkRefs = {}, linkLabels = {} } = {}) {
   const extracted = extractHtmlBody(html);
-  const bodyHtml = sanitizeRenderedHtml(extracted.bodyHtml || html, pageUrl, { imageRefs, linkRefs });
+  const bodyHtml = sanitizeRenderedHtml(extracted.bodyHtml || html, pageUrl, { imageRefs, linkRefs, linkLabels });
   return buildReaderDocument(title || extracted.title || inferTitleFromRenderedHtml(bodyHtml), bodyHtml);
 }
 
@@ -2416,10 +2471,22 @@ function renderMarkdownToHtml(markdown) {
       continue;
     }
 
+    const singleCellPipe = parseSingleCellMarkdownPipeLine(trimmed);
+    if (singleCellPipe) {
+      html.push(`<p>${renderMarkdownInline(singleCellPipe)}</p>`);
+      index += 1;
+      continue;
+    }
+
     const headingMatch = /^(#{1,6})\s+(.+)$/.exec(trimmed);
     if (headingMatch) {
       const level = headingMatch[1].length;
       html.push(`<h${level}>${renderMarkdownInline(headingMatch[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (isLooseMarkdownTableSeparatorLine(trimmed)) {
       index += 1;
       continue;
     }
@@ -2437,6 +2504,13 @@ function renderMarkdownToHtml(markdown) {
         index += 1;
       }
       html.push(`<blockquote>${renderMarkdownParagraphs(quoteLines)}</blockquote>`);
+      continue;
+    }
+
+    const loosePipeRow = !isMarkdownTableStart(lines, index) ? parseLooseMarkdownPipeRowLine(trimmed) : null;
+    if (loosePipeRow) {
+      html.push(renderLooseMarkdownPipeRow(loosePipeRow));
+      index += 1;
       continue;
     }
 
@@ -2498,6 +2572,9 @@ function isMarkdownBlockStart(lines, index) {
   return !trimmed ||
     /^```/.test(trimmed) ||
     isRawMarkdownHtmlBlock(trimmed) ||
+    parseSingleCellMarkdownPipeLine(trimmed) ||
+    isLooseMarkdownTableSeparatorLine(trimmed) ||
+    parseLooseMarkdownPipeRowLine(trimmed) ||
     /^(#{1,6})\s+/.test(trimmed) ||
     /^(?:-{3,}|\*{3,}|_{3,})$/.test(trimmed) ||
     /^>\s?/.test(trimmed) ||
@@ -2556,7 +2633,10 @@ function renderMarkdownTable(lines) {
   }
   const headers = rows[0];
   const columnCount = headers.length;
-  const bodyRows = rows.slice(2).map((row) => normalizeMarkdownTableRow(row, columnCount));
+  const bodyRows = rows
+    .slice(2)
+    .filter((row) => !isMarkdownTableSeparatorRow(row))
+    .map((row) => normalizeMarkdownTableRow(row, columnCount));
   return (
     "<table><thead><tr>" +
     headers.map((cell) => `<th>${renderMarkdownInline(cell)}</th>`).join("") +
@@ -2564,6 +2644,47 @@ function renderMarkdownTable(lines) {
     bodyRows.map((row) => `<tr>${row.map((cell) => `<td>${renderMarkdownInline(cell)}</td>`).join("")}</tr>`).join("") +
     "</tbody></table>"
   );
+}
+
+function isMarkdownTableSeparatorRow(row) {
+  return row.length > 0 && row.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function isLooseMarkdownTableSeparatorLine(line) {
+  const row = splitMarkdownTableRow(line);
+  return Boolean(row && isMarkdownTableSeparatorRow(row));
+}
+
+function parseSingleCellMarkdownPipeLine(line) {
+  const row = splitMarkdownTableRow(line);
+  if (!row || row.length !== 1 || isMarkdownTableSeparatorRow(row)) {
+    return "";
+  }
+  return row[0].trim();
+}
+
+function parseLooseMarkdownPipeRowLine(line) {
+  if (!/^\s*\|/.test(line) && !/\|\s*$/.test(line)) {
+    return null;
+  }
+  const row = splitMarkdownTableRow(line);
+  if (!row || row.length < 2 || isMarkdownTableSeparatorRow(row)) {
+    return null;
+  }
+  const usefulCells = row.filter((cell) => cell.trim());
+  return usefulCells.length >= 2 ? usefulCells : null;
+}
+
+function renderLooseMarkdownPipeRow(row) {
+  const cells = row.map((cell) => cell.trim()).filter(Boolean);
+  if (cells.length >= 3) {
+    return (
+      "<table><tbody><tr>" +
+      cells.map((cell) => `<td>${renderMarkdownInline(cell)}</td>`).join("") +
+      "</tr></tbody></table>"
+    );
+  }
+  return `<p>${cells.map((cell) => renderMarkdownInline(cell)).join(" ")}</p>`;
 }
 
 function splitMarkdownTableRow(line) {
@@ -2633,7 +2754,7 @@ function restoreMarkdownTokens(value, tokens) {
   return value.replace(/\u0000(\d+)\u0000/g, (match, index) => tokens[Number(index)] || "");
 }
 
-function sanitizeRenderedHtml(html, pageUrl, { imageRefs = {}, linkRefs = {} } = {}) {
+function sanitizeRenderedHtml(html, pageUrl, { imageRefs = {}, linkRefs = {}, linkLabels = {} } = {}) {
   if (typeof DOMParser === "undefined") {
     return sanitizeRewrittenAsset("html", html);
   }
@@ -2708,6 +2829,7 @@ function sanitizeRenderedHtml(html, pageUrl, { imageRefs = {}, linkRefs = {} } =
     }
   }
 
+  linkifyPlainReferenceLabels(doc.body, pageUrl, linkLabels);
   return doc.body.innerHTML;
 }
 
@@ -2720,6 +2842,90 @@ function restoreUrlReference(value, tagName, attributeName, { imageRefs = {}, li
     return linkRefs[trimmed];
   }
   return value;
+}
+
+function linkifyPlainReferenceLabels(root, pageUrl, linkLabels = {}) {
+  if (!root || !isPlainObject(linkLabels)) {
+    return;
+  }
+
+  const linkEntries = Object.entries(linkLabels)
+    .map(([label, href]) => ({
+      label,
+      normalizedLabel: normalizedReferenceLabel(label),
+      href
+    }))
+    .filter((entry) => entry.normalizedLabel && isSafeReducedHtmlUrl(entry.href))
+    .sort((left, right) => right.normalizedLabel.length - left.normalizedLabel.length);
+
+  for (const node of Array.from(root.querySelectorAll("td, th, li, p, h1, h2, h3, h4, h5, h6"))) {
+    if (node.querySelector("a, button, input, select, textarea")) {
+      continue;
+    }
+    const label = compactText(node.textContent || "");
+    const href = linkLabels[label];
+    if (!href || !isSafeReducedHtmlUrl(href)) {
+      const segments = segmentReferenceLabelText(label, linkEntries);
+      if (segments.length < 2) {
+        continue;
+      }
+      replaceNodeTextWithLinks(node, segments, pageUrl);
+      continue;
+    }
+    const resolved = resolveReducedHtmlUrl(href, pageUrl);
+    if (!resolved) {
+      continue;
+    }
+    replaceNodeTextWithLinks(node, [{ label, href }], pageUrl);
+  }
+}
+
+function segmentReferenceLabelText(text, linkEntries) {
+  const normalized = normalizedReferenceLabel(text);
+  const segments = [];
+  let index = 0;
+  while (index < normalized.length) {
+    while (index < normalized.length && normalized[index] === " ") {
+      index += 1;
+    }
+    if (index >= normalized.length) {
+      break;
+    }
+    const match = linkEntries.find((entry) => {
+      if (!normalized.startsWith(entry.normalizedLabel, index)) {
+        return false;
+      }
+      const nextChar = normalized[index + entry.normalizedLabel.length] || " ";
+      return nextChar === " ";
+    });
+    if (!match) {
+      return [];
+    }
+    segments.push({ label: match.label, href: match.href });
+    index += match.normalizedLabel.length;
+  }
+  return segments;
+}
+
+function replaceNodeTextWithLinks(node, segments, pageUrl) {
+  node.textContent = "";
+  segments.forEach((segment, index) => {
+    const resolved = resolveReducedHtmlUrl(segment.href, pageUrl);
+    if (!resolved) {
+      return;
+    }
+    if (index > 0) {
+      node.append(" ");
+    }
+    const link = node.ownerDocument.createElement("a");
+    link.setAttribute("href", resolved);
+    link.textContent = segment.label;
+    node.append(link);
+  });
+}
+
+function normalizedReferenceLabel(text) {
+  return compactText(text).toLowerCase();
 }
 
 function rescueEscapedSafeHtmlBlocks(html) {
