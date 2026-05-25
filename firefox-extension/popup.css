@@ -1,0 +1,137 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  width: 360px;
+  font: 13px/1.4 "SF Pro Text", "Segoe UI", sans-serif;
+  color: #16211f;
+  background: linear-gradient(180deg, #f1f7f3 0%, #e7efe8 100%);
+}
+
+.panel {
+  padding: 14px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel-header h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.panel-header p {
+  margin: 4px 0 0;
+  color: #4b5b57;
+}
+
+.card {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid #c8d8cf;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.84);
+  box-shadow: 0 8px 24px rgba(22, 33, 31, 0.06);
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.muted {
+  margin: 0 0 10px;
+  color: #546762;
+}
+
+.toggle-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+}
+
+label {
+  display: block;
+  margin-bottom: 10px;
+}
+
+label span {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+input,
+select,
+button {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #b8cbc1;
+  padding: 9px 10px;
+  font: inherit;
+}
+
+input,
+select {
+  background: #fbfdfb;
+}
+
+button {
+  cursor: pointer;
+  font-weight: 700;
+  color: #f4faf6;
+  background: #1b6b53;
+}
+
+button:hover {
+  background: #155541;
+}
+
+.actions {
+  margin-top: 12px;
+}
+
+.site-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.site-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #eef5f0;
+}
+
+.site-row button {
+  width: auto;
+  padding: 6px 10px;
+  background: #7d2b2b;
+}
+
+.site-row button:hover {
+  background: #651f1f;
+}
+
+.status {
+  min-height: 18px;
+  margin: 4px 2px 0;
+  color: #1b6b53;
+  font-weight: 600;
+}

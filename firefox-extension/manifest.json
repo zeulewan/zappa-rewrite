@@ -1,0 +1,33 @@
+{
+  "manifest_version": 2,
+  "name": "Zappa Rewrite",
+  "version": "0.1.0",
+  "description": "Rewrite HTML, CSS, and JavaScript in Firefox through a local or remote LLM backend.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "webRequest",
+    "webRequestBlocking",
+    "webRequestFilterResponse",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "zappa-rewrite@nova.local"
+    }
+  },
+  "browser_action": {
+    "default_title": "Zappa Rewrite",
+    "default_popup": "popup.html",
+    "default_icon": "icons/icon.svg"
+  },
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  }
+}
