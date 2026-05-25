@@ -31,7 +31,7 @@ Use a consistent page structure:
 - Article pages: title, standfirst/subhead if present, byline/date if present, hero figure, then article body in source order.
 - Section/front pages: page or section title, useful navigation, then source sections as headings with compact link lists or tables.
 - Top navigation/menu bars: use a horizontal Markdown pipe table, not a two-column "Section | Link" table. Each cell should be the actual visible label as the link text, e.g. [News](/news), [In focus](/in-focus), [Sport](/sport). Do not duplicate the same label in adjacent columns.
-- Image src values may be zappa-image-N placeholders. Copy those placeholders exactly into Markdown image URLs or safe img tags; never expand, edit, shorten, or invent image URLs.
+- Image src values and link href values may be zappa-image-N or zappa-link-N placeholders. Copy those placeholders exactly into Markdown image/link URLs or safe HTML tags; never expand, edit, shorten, or invent URLs.
 Preserve useful images, captions, links, dimensions, forms, navigation, and article/listing structure.
 Remove ads, popups, autoplay, nag screens, tracking widgets, and distracting clutter."""
 

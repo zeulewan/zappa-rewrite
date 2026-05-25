@@ -320,7 +320,7 @@ Goals:
 - Use Markdown for normal prose, headings, lists, links, blockquotes, and code.
 - Use small safe HTML blocks only when Markdown is insufficient, such as <figure>, <img width height alt>, complex tables, or forms.
 - When using images, preserve useful width and height attributes from the source if available; avoid huge, distorted, or cropped images.
-- Source image URLs may be replaced with zappa-image-N placeholders. If present, copy those placeholders exactly into Markdown image URLs or safe <img> tags; do not expand, edit, or invent image URLs.
+- Source image URLs and link URLs may be replaced with zappa-image-N or zappa-link-N placeholders. If present, copy those placeholders exactly into Markdown image/link URLs or safe HTML tags; do not expand, edit, shorten, or invent URLs.
 
 Structure standard:
 - Keep the source page's high-level order: useful site/header navigation, main content, then related or supporting content.
@@ -1389,6 +1389,7 @@ async function rewriteAsset({
     timings,
     signal,
     imageRefs: preparedSource.imageRefs,
+    linkRefs: preparedSource.linkRefs,
     readerDocumentStarted,
     emitReaderDocumentEnd,
     onStreamHtml
@@ -1397,27 +1398,29 @@ async function rewriteAsset({
 
 function prepareSourceForModel(assetKind, source, url = "") {
   if (assetKind !== "html") {
-    return { source, imageRefs: {} };
+    return { source, imageRefs: {}, linkRefs: {} };
   }
 
   const domReduced = reduceHtmlWithDom(source, url);
   if (domReduced) {
-    return tokenizeModelImageSources(domReduced);
+    return tokenizeModelUrlSources(domReduced);
   }
 
-  return tokenizeModelImageSources(reduceHtmlWithRegex(source));
+  return tokenizeModelUrlSources(reduceHtmlWithRegex(source));
 }
 
-function tokenizeModelImageSources(source) {
+function tokenizeModelUrlSources(source) {
   if (typeof DOMParser === "undefined") {
-    return { source, imageRefs: {} };
+    return { source, imageRefs: {}, linkRefs: {} };
   }
 
   const imageRefs = {};
+  const linkRefs = {};
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(source, "text/html");
     let nextImageRef = 0;
+    let nextLinkRef = 0;
     for (const image of Array.from(doc.images || [])) {
       const src = image.getAttribute("src") || "";
       if (!src || !isSafeReducedHtmlUrl(src)) {
@@ -1428,16 +1431,27 @@ function tokenizeModelImageSources(source) {
       imageRefs[token] = src;
       image.setAttribute("src", token);
     }
-    if (!nextImageRef) {
-      return { source, imageRefs };
+    for (const link of Array.from(doc.querySelectorAll("a[href]"))) {
+      const href = link.getAttribute("href") || "";
+      if (!href || !isSafeReducedHtmlUrl(href)) {
+        continue;
+      }
+      const token = `zappa-link-${nextLinkRef}`;
+      nextLinkRef += 1;
+      linkRefs[token] = href;
+      link.setAttribute("href", token);
+    }
+    if (!nextImageRef && !nextLinkRef) {
+      return { source, imageRefs, linkRefs };
     }
     return {
       source: compactHtml(`<!doctype html>${doc.documentElement.outerHTML}`),
-      imageRefs
+      imageRefs,
+      linkRefs
     };
   } catch (error) {
-    console.warn("zappa image tokenization failed", error);
-    return { source, imageRefs: {} };
+    console.warn("zappa URL tokenization failed", error);
+    return { source, imageRefs: {}, linkRefs: {} };
   }
 }
 
@@ -1478,6 +1492,7 @@ function reduceHtmlWithDom(source, pageUrl) {
     hydrateImages(doc);
     removeReducedHtmlNoise(doc);
     trimOverlongNavigation(doc);
+    materializeMeaningfulEmptyLinks(doc);
     cleanReducedHtmlAttributes(doc, pageUrl);
     unwrapReducedHtmlContainers(doc);
     removeEmptyReducedHtmlNodes(doc);
@@ -1709,6 +1724,18 @@ function trimOverlongNavigation(doc) {
     }
     if (!compactText(nav.textContent || "")) {
       nav.remove();
+    }
+  }
+}
+
+function materializeMeaningfulEmptyLinks(doc) {
+  for (const link of Array.from(doc.querySelectorAll("a[href]"))) {
+    if (compactText(link.textContent || "")) {
+      continue;
+    }
+    const label = compactText(link.getAttribute("aria-label") || link.getAttribute("title") || "");
+    if (label) {
+      link.textContent = label;
     }
   }
 }
@@ -1976,6 +2003,7 @@ async function rewriteWithOpenAICompatible({
   timings,
   signal,
   imageRefs = {},
+  linkRefs = {},
   readerDocumentStarted = false,
   emitReaderDocumentEnd = true,
   onStreamHtml
@@ -2014,6 +2042,7 @@ async function rewriteWithOpenAICompatible({
   if (payload.stream && response.body && responseContentType.includes("text/event-stream")) {
     return streamChatCompletionToHtml(response, url, timings, signal, onStreamHtml, {
       imageRefs,
+      linkRefs,
       readerDocumentStarted,
       emitReaderDocumentEnd
     });
@@ -2037,7 +2066,7 @@ async function rewriteWithOpenAICompatible({
   if (typeof parsed.content !== "string" || !parsed.content) {
     throw new Error("OpenAI-compatible JSON output did not contain content");
   }
-  return renderModelOutput(parsed, url, imageRefs);
+  return renderModelOutput(parsed, url, { imageRefs, linkRefs });
 }
 
 async function streamChatCompletionToHtml(
@@ -2046,7 +2075,7 @@ async function streamChatCompletionToHtml(
   timings,
   signal,
   onStreamHtml,
-  { imageRefs = {}, readerDocumentStarted = false, emitReaderDocumentEnd = true } = {}
+  { imageRefs = {}, linkRefs = {}, readerDocumentStarted = false, emitReaderDocumentEnd = true } = {}
 ) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -2060,7 +2089,7 @@ async function streamChatCompletionToHtml(
       ensureReaderDocumentStarted();
     }
     const renderStartedAt = Date.now();
-    onStreamHtml(sanitizeRenderedHtml(html, pageUrl, imageRefs));
+    onStreamHtml(sanitizeRenderedHtml(html, pageUrl, { imageRefs, linkRefs }));
     timings.markdownRenderMs = (timings.markdownRenderMs || 0) + (Date.now() - renderStartedAt);
   });
   let streamStarted = false;
@@ -2135,7 +2164,7 @@ async function streamChatCompletionToHtml(
     ensureReaderDocumentStarted();
   }
   if (finalHtml) {
-    onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl, imageRefs));
+    onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl, { imageRefs, linkRefs }));
   }
   if (emitReaderDocumentEnd) {
     onStreamHtml(buildReaderDocumentEnd());
@@ -2144,31 +2173,31 @@ async function streamChatCompletionToHtml(
   return { streamed: true, content: rawModelText };
 }
 
-function renderModelOutput(parsed, pageUrl, imageRefs = {}) {
+function renderModelOutput(parsed, pageUrl, { imageRefs = {}, linkRefs = {} } = {}) {
   const content = parsed.content;
   const title = typeof parsed.title === "string" ? compactText(parsed.title) : "";
   const format = typeof parsed.format === "string" ? parsed.format.toLowerCase() : "";
 
   if (format === "html" || format === "html_fragment" || looksLikeHtmlDocument(content)) {
-    return renderHtmlDocument(content, { title, pageUrl, imageRefs });
+    return renderHtmlDocument(content, { title, pageUrl, imageRefs, linkRefs });
   }
 
-  return renderMarkdownDocument(content, { title, pageUrl, imageRefs });
+  return renderMarkdownDocument(content, { title, pageUrl, imageRefs, linkRefs });
 }
 
 function looksLikeHtmlDocument(content) {
   return /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(content);
 }
 
-function renderMarkdownDocument(markdown, { title = "", pageUrl = "", imageRefs = {} } = {}) {
+function renderMarkdownDocument(markdown, { title = "", pageUrl = "", imageRefs = {}, linkRefs = {} } = {}) {
   const rendered = renderMarkdownToHtml(markdown);
-  const sanitized = sanitizeRenderedHtml(rendered, pageUrl, imageRefs);
+  const sanitized = sanitizeRenderedHtml(rendered, pageUrl, { imageRefs, linkRefs });
   return buildReaderDocument(title || inferTitleFromRenderedHtml(sanitized), sanitized);
 }
 
-function renderHtmlDocument(html, { title = "", pageUrl = "", imageRefs = {} } = {}) {
+function renderHtmlDocument(html, { title = "", pageUrl = "", imageRefs = {}, linkRefs = {} } = {}) {
   const extracted = extractHtmlBody(html);
-  const bodyHtml = sanitizeRenderedHtml(extracted.bodyHtml || html, pageUrl, imageRefs);
+  const bodyHtml = sanitizeRenderedHtml(extracted.bodyHtml || html, pageUrl, { imageRefs, linkRefs });
   return buildReaderDocument(title || extracted.title || inferTitleFromRenderedHtml(bodyHtml), bodyHtml);
 }
 
@@ -2604,7 +2633,7 @@ function restoreMarkdownTokens(value, tokens) {
   return value.replace(/\u0000(\d+)\u0000/g, (match, index) => tokens[Number(index)] || "");
 }
 
-function sanitizeRenderedHtml(html, pageUrl, imageRefs = {}) {
+function sanitizeRenderedHtml(html, pageUrl, { imageRefs = {}, linkRefs = {} } = {}) {
   if (typeof DOMParser === "undefined") {
     return sanitizeRewrittenAsset("html", html);
   }
@@ -2642,9 +2671,7 @@ function sanitizeRenderedHtml(html, pageUrl, imageRefs = {}) {
       }
 
       if (REDUCED_HTML_URL_ATTRS.has(name)) {
-        const urlValue = name === "src" && tagName === "img"
-          ? restoreImageReference(value, imageRefs)
-          : value;
+        const urlValue = restoreUrlReference(value, tagName, name, { imageRefs, linkRefs });
         if (!isSafeReducedHtmlUrl(urlValue)) {
           node.removeAttribute(attribute.name);
           continue;
@@ -2684,10 +2711,13 @@ function sanitizeRenderedHtml(html, pageUrl, imageRefs = {}) {
   return doc.body.innerHTML;
 }
 
-function restoreImageReference(value, imageRefs) {
+function restoreUrlReference(value, tagName, attributeName, { imageRefs = {}, linkRefs = {} } = {}) {
   const trimmed = String(value || "").trim();
-  if (imageRefs && Object.hasOwn(imageRefs, trimmed)) {
+  if (attributeName === "src" && tagName === "img" && imageRefs && Object.hasOwn(imageRefs, trimmed)) {
     return imageRefs[trimmed];
+  }
+  if (attributeName === "href" && tagName === "a" && linkRefs && Object.hasOwn(linkRefs, trimmed)) {
+    return linkRefs[trimmed];
   }
   return value;
 }

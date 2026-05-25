@@ -48,8 +48,14 @@ TEST_SITE_BODY = """<!doctype html>
     <!-- this comment should be removed before the model sees the page -->
     <header class="site-banner"><nav><a href="/one">one</a></nav></header>
     <main id="content" class="layout" data-page-kind="article">
+      <nav aria-label="Sections">
+        <a href="/news">News</a>
+        <a href="/in-focus">In focus</a>
+        <a href="/sport">Sport</a>
+      </nav>
       <article class="story-card" data-testid="story">
         <h1 id="marker" class="headline">ORIGINAL PAGE</h1>
+        <a href="/world/2026/may/25/iran-denies-deal-us-imminent-israel-oman-strait-of-hormuz" aria-label="Iran denies deal with US is imminent despite some progress"></a>
         <figure class="media-wrap" data-component="hero">
           <img
             class="hero-image"
@@ -129,6 +135,11 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
         type(self).last_source = source
         image_token_match = re.search(r'src="(zappa-image-\d+)"', source)
         hero_src = image_token_match.group(1) if image_token_match else "http://127.0.0.1:18080/images/hero-large.jpg"
+        link_tokens = re.findall(r'href="(zappa-link-\d+)"', source)
+        news_href = link_tokens[0] if len(link_tokens) > 0 else "http://127.0.0.1:18080/news"
+        focus_href = link_tokens[1] if len(link_tokens) > 1 else "http://127.0.0.1:18080/in-focus"
+        sport_href = link_tokens[2] if len(link_tokens) > 2 else "http://127.0.0.1:18080/sport"
+        main_href = link_tokens[3] if len(link_tokens) > 3 else "http://127.0.0.1:18080/world/2026/may/25/iran-denies-deal-us-imminent-israel-oman-strait-of-hormuz"
         rewritten = f"""# REWRITTEN PAGE
 
 &lt;figure&gt;&lt;img src=&quot;{hero_src}&quot; width=&quot;960&quot; height=&quot;540&quot; alt=&quot;A useful hero image&quot; /&gt;&lt;figcaption&gt;Useful image caption.&lt;/figcaption&gt;&lt;/figure&gt;
@@ -139,8 +150,10 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
 
 Inline safe media: <figure><img src="http://127.0.0.1:18080/images/inline-safe.jpg" alt="Inline safe image" width="465" loading="eager"/><figcaption>Inline figure caption.</figcaption></figure>
 
-| [News](http://127.0.0.1:18080/news) | [In focus](http://127.0.0.1:18080/focus) | [Sport](http://127.0.0.1:18080/sport) |
+| [News]({news_href}) | [In focus]({focus_href}) | [Sport]({sport_href}) |
 | --- | --- | --- |
+
+[Iran denies deal with US is imminent despite some progress]({main_href})
 
 Useful article text survives the reducer.
 
@@ -348,6 +361,8 @@ def assert_reduced_source(source: str) -> None:
         "Structured metadata paragraph two should also survive",
         "Useful image caption.",
         "src=\"zappa-image-",
+        "href=\"zappa-link-",
+        "Iran denies deal with US is imminent despite some progress",
         "width=\"960\"",
         "height=\"540\"",
         "alt=\"A useful hero image\"",
@@ -556,13 +571,22 @@ def main() -> None:
                 )
                 expected_table_links = [
                     {"text": "News", "href": "http://127.0.0.1:18080/news"},
-                    {"text": "In focus", "href": "http://127.0.0.1:18080/focus"},
+                    {"text": "In focus", "href": "http://127.0.0.1:18080/in-focus"},
                     {"text": "Sport", "href": "http://127.0.0.1:18080/sport"},
                 ]
                 if table_links != expected_table_links:
                     raise RuntimeError(f"horizontal markdown menu table did not render: text={table_text!r} links={table_links!r}")
+                main_story_href = driver.execute_script(
+                    """
+                    return document.querySelector('main.zappa-reader a[href$="/world/2026/may/25/iran-denies-deal-us-imminent-israel-oman-strait-of-hormuz"]')?.href || '';
+                    """
+                )
+                if main_story_href != "http://127.0.0.1:18080/world/2026/may/25/iran-denies-deal-us-imminent-israel-oman-strait-of-hormuz":
+                    raise RuntimeError(f"main story link was not restored: {main_story_href!r}")
                 if 'src="zappa-image-' not in MockPiBridgeHandler.last_source:
                     raise RuntimeError(f"expected model source to use image placeholders: {MockPiBridgeHandler.last_source[:1000]!r}")
+                if 'href="zappa-link-' not in MockPiBridgeHandler.last_source:
+                    raise RuntimeError(f"expected model source to use link placeholders: {MockPiBridgeHandler.last_source[:1000]!r}")
                 assert_reduced_source(MockPiBridgeHandler.last_source)
                 rewrite_status = get_extension_storage(driver, extension_uuid, "rewriteStatus")
                 if not isinstance(rewrite_status, dict) or rewrite_status.get("state") != "done":
