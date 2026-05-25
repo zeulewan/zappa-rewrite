@@ -7,6 +7,7 @@ import os
 import socketserver
 import tempfile
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -319,6 +320,7 @@ def assert_reduced_source(source: str) -> None:
 
 
 def assert_popup_multiple_statuses(driver: webdriver.Firefox, extension_uuid: str) -> None:
+    now_ms = int(time.time() * 1000)
     set_extension_storage(
         driver,
         extension_uuid,
@@ -334,8 +336,8 @@ def assert_popup_multiple_statuses(driver: webdriver.Firefox, extension_uuid: st
                     "host": "one.example",
                     "sourceChars": 10,
                     "contentChars": 0,
-                    "startedAt": 1000,
-                    "updatedAt": 2000,
+                    "startedAt": now_ms - 1000,
+                    "updatedAt": now_ms,
                 },
                 {
                     "id": "two",
@@ -347,18 +349,28 @@ def assert_popup_multiple_statuses(driver: webdriver.Firefox, extension_uuid: st
                     "host": "two.example",
                     "sourceChars": 20,
                     "contentChars": 0,
-                    "startedAt": 1000,
-                    "updatedAt": 1900,
+                    "startedAt": now_ms - 1000,
+                    "updatedAt": now_ms - 100,
                 },
             ]
         },
     )
     driver.get(f"moz-extension://{extension_uuid}/popup.html")
-    row_count = driver.execute_script("return document.querySelectorAll('#rewrite-statuses .rewrite-status-item').length")
+    wait_for_condition(
+        driver,
+        lambda: driver.execute_script("return document.querySelectorAll('#rewrite-statuses .rewrite-status-host').length") == 2,
+        timeout=5,
+    )
+    wait_for_condition(
+        driver,
+        lambda: driver.execute_script("return document.getElementById('rewrite-status-message')?.textContent || ''") == "2 rewrites active",
+        timeout=5,
+    )
     message = driver.execute_script("return document.getElementById('rewrite-status-message')?.textContent || ''")
     hosts = driver.execute_script(
         "return Array.from(document.querySelectorAll('#rewrite-statuses .rewrite-status-host')).map(node => node.textContent)"
     )
+    row_count = len(hosts)
     if row_count != 2 or message != "2 rewrites active" or hosts != ["one.example", "two.example"]:
         raise RuntimeError(f"multiple status UI failed: rows={row_count!r} message={message!r} hosts={hosts!r}")
 

@@ -522,8 +522,9 @@ def make_handler(
             self.close_connection = True
 
             raw_parts: list[str] = []
+            stream = None
             try:
-                for delta in run_pi_rewrite_stream(
+                stream = run_pi_rewrite_stream(
                     pi_bin=pi_bin,
                     provider=provider,
                     model=model,
@@ -531,7 +532,8 @@ def make_handler(
                     cwd=cwd,
                     timeout_seconds=timeout_seconds,
                     messages=messages,
-                ):
+                )
+                for delta in stream:
                     raw_parts.append(delta)
                     self._send_sse_data(build_chat_completion_stream_chunk(model, delta))
 
@@ -546,16 +548,30 @@ def make_handler(
                 self._send_sse_data(build_chat_completion_stream_chunk(model, "", finish_reason="stop"))
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                if stream is not None:
+                    stream.close()
+                log_rewrite_end(
+                    client,
+                    "cancelled",
+                    time.monotonic() - started,
+                    request_summary,
+                )
             except Exception as error:  # noqa: BLE001
+                if stream is not None:
+                    stream.close()
                 log_rewrite_end(
                     client,
                     "error",
                     time.monotonic() - started,
                     {"message": str(error)},
                 )
-                self._send_sse_data({"error": str(error)})
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
+                try:
+                    self._send_sse_data({"error": str(error)})
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
         def _send_sse_data(self, body: dict[str, Any]) -> None:
             encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")

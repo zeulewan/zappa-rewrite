@@ -22,9 +22,12 @@ const DEFAULT_REWRITE_STATUS = {
   sourceChars: 0,
   contentChars: 0,
   startedAt: 0,
-  updatedAt: 0
+  updatedAt: 0,
+  timings: {}
 };
 const MAX_REWRITE_STATUSES = 8;
+const MAX_COMPLETED_REWRITE_STATUSES = 3;
+const STALE_ACTIVE_REWRITE_STATUS_MS = 120000;
 const DEV_SETTINGS_PATH = "dev-settings.json";
 const FORCED_DEV_SETTING_KEYS = [
   "configured",
@@ -398,11 +401,16 @@ browser.webRequest.onBeforeRequest.addListener(
 
     const context = {
       requestId: details.requestId,
+      tabId: details.tabId,
       url: details.url,
       siteHost: getSiteHostFromDetails(details),
       assetKind,
       responseHeaders: [],
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      timings: {},
+      abortController: null,
+      cancelled: false,
+      cancelReason: ""
     };
     updateRewriteStatus({
       id: context.requestId,
@@ -424,7 +432,7 @@ browser.webRequest.onBeforeRequest.addListener(
 
     filter.onerror = (event) => {
       console.error("zappa filter error", event.error);
-      requestContexts.delete(details.requestId);
+      cancelRequestContext(details.requestId, event.error || "request cancelled");
       try {
         filter.disconnect();
       } catch (error) {
@@ -440,6 +448,7 @@ browser.webRequest.onBeforeRequest.addListener(
         bodyBytes = concatChunks(chunks);
         const charset = getCharsetFromHeaders(context.responseHeaders);
         const originalText = decodeBytes(bodyBytes, charset);
+        context.timings.captureMs = Date.now() - context.startedAt;
 
         if (!originalText.trim()) {
           await updateRewriteStatus({
@@ -450,6 +459,7 @@ browser.webRequest.onBeforeRequest.addListener(
             detail: shortUrl(context.url),
             url: context.url,
             host: context.siteHost,
+            timings: context.timings,
             startedAt: context.startedAt
           });
           filter.write(bodyBytes);
@@ -466,6 +476,7 @@ browser.webRequest.onBeforeRequest.addListener(
           url: context.url,
           host: context.siteHost,
           sourceChars: originalText.length,
+          timings: context.timings,
           startedAt: context.startedAt
         });
         const rewrittenText = await rewriteAsset({
@@ -476,10 +487,14 @@ browser.webRequest.onBeforeRequest.addListener(
           source: originalText,
           requestId: context.requestId,
           startedAt: context.startedAt,
+          timings: context.timings,
+          signal: createRequestAbortSignal(context),
           onStreamHtml: (html) => {
+            const writeStartedAt = Date.now();
             streamedResponse = true;
             streamedContentChars += html.length;
             filter.write(new TextEncoder().encode(html));
+            context.timings.renderWriteMs = (context.timings.renderWriteMs || 0) + (Date.now() - writeStartedAt);
           }
         });
 
@@ -494,6 +509,7 @@ browser.webRequest.onBeforeRequest.addListener(
             host: context.siteHost,
             sourceChars: originalText.length,
             contentChars: streamedContentChars,
+            timings: finalizeTimings(context.timings, context.startedAt),
             startedAt: context.startedAt
           });
           filter.close();
@@ -511,11 +527,31 @@ browser.webRequest.onBeforeRequest.addListener(
           host: context.siteHost,
           sourceChars: originalText.length,
           contentChars: finalText.length,
+          timings: finalizeTimings(context.timings, context.startedAt),
           startedAt: context.startedAt
         });
         filter.write(new TextEncoder().encode(finalText));
         filter.close();
       } catch (error) {
+        if (isAbortError(error) || context.cancelled) {
+          await updateRewriteStatus({
+            id: context.requestId,
+            state: "cancelled",
+            progress: 100,
+            message: "Rewrite cancelled",
+            detail: context.cancelReason || stringifyError(error),
+            url: context.url,
+            host: context.siteHost,
+            timings: finalizeTimings(context.timings, context.startedAt),
+            startedAt: context.startedAt
+          });
+          try {
+            filter.disconnect();
+          } catch (disconnectError) {
+            console.warn("zappa disconnect after cancel failed", disconnectError);
+          }
+          return;
+        }
         if (error instanceof PassThroughResponse) {
           console.warn("zappa pass-through", error.message);
           await updateRewriteStatus({
@@ -526,6 +562,7 @@ browser.webRequest.onBeforeRequest.addListener(
             detail: error.message,
             url: context.url,
             host: context.siteHost,
+            timings: finalizeTimings(context.timings, context.startedAt),
             startedAt: context.startedAt
           });
           filter.write(bodyBytes);
@@ -540,6 +577,7 @@ browser.webRequest.onBeforeRequest.addListener(
           detail: stringifyError(error),
           url: context.url,
           host: context.siteHost,
+          timings: finalizeTimings(context.timings, context.startedAt),
           startedAt: context.startedAt
         });
         const errorBody = buildErrorBody(context.assetKind, stringifyError(error));
@@ -562,18 +600,35 @@ browser.webRequest.onBeforeRequest.addListener(
 
 browser.webRequest.onErrorOccurred.addListener(
   (details) => {
-    requestContexts.delete(details.requestId);
+    cancelRequestContext(details.requestId, details.error || "request error");
   },
   { urls: ["<all_urls>"], types: REQUEST_TYPES }
 );
+
+browser.tabs.onRemoved.addListener((tabId) => {
+  for (const context of requestContexts.values()) {
+    if (context.tabId === tabId) {
+      cancelRequestContext(context.requestId, "tab closed");
+    }
+  }
+});
 
 async function initializeSettings() {
   const devSettings = await loadDevSettings();
   const defaults = normalizeSettings({ ...DEFAULT_SETTINGS, ...devSettings });
   Object.assign(DEFAULT_SETTINGS, defaults);
-  const stored = await browser.storage.local.get(DEFAULT_SETTINGS);
+  const stored = await browser.storage.local.get({
+    ...DEFAULT_SETTINGS,
+    rewriteStatus: DEFAULT_REWRITE_STATUS,
+    rewriteStatuses: []
+  });
   settingsCache = normalizeSettings(applyForcedDevSettings(stored, devSettings));
-  await browser.storage.local.set(settingsCache);
+  rewriteStatusesCache = pruneRewriteStatuses(normalizeRewriteStatusesForStartup(stored.rewriteStatuses));
+  await browser.storage.local.set({
+    ...settingsCache,
+    rewriteStatus: rewriteStatusesCache[0] || DEFAULT_REWRITE_STATUS,
+    rewriteStatuses: rewriteStatusesCache
+  });
 }
 
 async function loadDevSettings() {
@@ -672,10 +727,42 @@ function mergeRewriteStatus(statuses, status) {
     status,
     ...statuses.filter((entry) => entry.id !== status.id)
   ];
-  return merged
+  return pruneRewriteStatuses(merged
     .map(normalizeRewriteStatus)
-    .sort(compareRewriteStatuses)
-    .slice(0, MAX_REWRITE_STATUSES);
+    .sort(compareRewriteStatuses));
+}
+
+function pruneRewriteStatuses(statuses) {
+  const now = Date.now();
+  const active = [];
+  const completed = [];
+
+  for (const status of statuses) {
+    if (isActiveRewriteState(status.state)) {
+      if (status.updatedAt && now - status.updatedAt <= STALE_ACTIVE_REWRITE_STATUS_MS) {
+        active.push(status);
+      }
+      continue;
+    }
+    if (status.updatedAt) {
+      completed.push(status);
+    }
+  }
+
+  return [
+    ...active,
+    ...completed.slice(0, MAX_COMPLETED_REWRITE_STATUSES)
+  ].slice(0, MAX_REWRITE_STATUSES);
+}
+
+function normalizeRewriteStatusesForStartup(raw) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map(normalizeRewriteStatus)
+    .filter((status) => status.updatedAt && !isActiveRewriteState(status.state))
+    .sort(compareRewriteStatuses);
 }
 
 function compareRewriteStatuses(left, right) {
@@ -691,6 +778,43 @@ function isActiveRewriteState(state) {
   return state === "capturing" || state === "queued" || state === "rewriting";
 }
 
+function createRequestAbortSignal(context) {
+  context.abortController = new AbortController();
+  if (context.cancelled) {
+    context.abortController.abort();
+  }
+  return context.abortController.signal;
+}
+
+function cancelRequestContext(requestId, reason) {
+  const context = requestContexts.get(requestId);
+  if (!context) {
+    return;
+  }
+  context.cancelled = true;
+  context.cancelReason = reason || "cancelled";
+  if (context.abortController) {
+    context.abortController.abort();
+  }
+  updateRewriteStatus({
+    id: context.requestId,
+    state: "cancelled",
+    progress: 100,
+    message: "Rewrite cancelled",
+    detail: context.cancelReason,
+    url: context.url,
+    host: context.siteHost,
+    timings: finalizeTimings(context.timings, context.startedAt),
+    startedAt: context.startedAt
+  }).catch((error) => {
+    console.warn("zappa cancel status update failed", error);
+  });
+}
+
+function isAbortError(error) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 function normalizeRewriteStatus(raw) {
   const progress = Number.parseInt(raw.progress, 10);
   return {
@@ -704,8 +828,32 @@ function normalizeRewriteStatus(raw) {
     sourceChars: toNonNegativeInteger(raw.sourceChars),
     contentChars: toNonNegativeInteger(raw.contentChars),
     startedAt: toNonNegativeInteger(raw.startedAt),
-    updatedAt: toNonNegativeInteger(raw.updatedAt)
+    updatedAt: toNonNegativeInteger(raw.updatedAt),
+    timings: normalizeTimingMap(raw.timings)
   };
+}
+
+function normalizeTimingMap(raw) {
+  if (!isPlainObject(raw)) {
+    return {};
+  }
+  const timings = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) {
+      timings[key] = Math.round(number);
+    }
+  }
+  return timings;
+}
+
+function finalizeTimings(timings, startedAt) {
+  const finalized = {
+    ...timings,
+    totalMs: Date.now() - startedAt
+  };
+  delete finalized.backendStartedAt;
+  return finalized;
 }
 
 function toNonNegativeInteger(value) {
@@ -865,8 +1013,11 @@ function stringifyError(error) {
   return String(error);
 }
 
-async function rewriteAsset({ url, host, assetKind, contentType, source, requestId, startedAt, onStreamHtml }) {
+async function rewriteAsset({ url, host, assetKind, contentType, source, requestId, startedAt, timings, signal, onStreamHtml }) {
+  const reduceStartedAt = Date.now();
   const modelSource = prepareSourceForModel(assetKind, source, url);
+  timings.reduceMs = Date.now() - reduceStartedAt;
+  timings.reducedChars = modelSource.length;
   if (modelSource.length > settingsCache.maxInputChars) {
     throw new PassThroughResponse(
       `asset too large after reduction (${modelSource.length} > ${settingsCache.maxInputChars}; raw ${source.length})`
@@ -884,9 +1035,10 @@ async function rewriteAsset({ url, host, assetKind, contentType, source, request
     url,
     host,
     sourceChars: source.length,
+    timings,
     startedAt
   });
-  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source: modelSource, onStreamHtml });
+  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source: modelSource, timings, signal, onStreamHtml });
 }
 
 function prepareSourceForModel(assetKind, source, url = "") {
@@ -1285,7 +1437,7 @@ function compactText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
-async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source, onStreamHtml }) {
+async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source, timings, signal, onStreamHtml }) {
   const headers = {
     "Content-Type": "application/json"
   };
@@ -1301,11 +1453,15 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
     messages: buildMessages({ url, assetKind, contentType, source })
   };
 
+  const backendStartedAt = Date.now();
+  timings.backendStartedAt = backendStartedAt;
   const response = await fetch(`${trimTrailingSlash(settingsCache.baseUrl)}/chat/completions`, {
     method: "POST",
     headers,
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal
   });
+  timings.backendHeadersMs = Date.now() - backendStartedAt;
 
   if (!response.ok) {
     const text = await response.text();
@@ -1314,10 +1470,11 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
 
   const responseContentType = response.headers.get("content-type") || "";
   if (payload.stream && response.body && responseContentType.includes("text/event-stream")) {
-    return streamChatCompletionToHtml(response, url, onStreamHtml);
+    return streamChatCompletionToHtml(response, url, timings, signal, onStreamHtml);
   }
 
   const responseText = await response.text();
+  timings.backendMs = Date.now() - backendStartedAt;
   let parsedResponse;
   try {
     parsedResponse = JSON.parse(responseText);
@@ -1337,7 +1494,7 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
   return renderModelOutput(parsed, url);
 }
 
-async function streamChatCompletionToHtml(response, pageUrl, onStreamHtml) {
+async function streamChatCompletionToHtml(response, pageUrl, timings, signal, onStreamHtml) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const contentExtractor = createJsonContentExtractor((markdownDelta) => {
@@ -1346,15 +1503,27 @@ async function streamChatCompletionToHtml(response, pageUrl, onStreamHtml) {
   const markdownStreamer = createMarkdownHtmlStreamer((html) => {
     if (!streamStarted) {
       streamStarted = true;
+      timings.firstRenderMs = Date.now() - backendStartedAt;
       onStreamHtml(buildReaderDocumentStart("Zappa Rewrite"));
     }
+    const renderStartedAt = Date.now();
     onStreamHtml(sanitizeRenderedHtml(html, pageUrl));
+    timings.markdownRenderMs = (timings.markdownRenderMs || 0) + (Date.now() - renderStartedAt);
   });
   let streamStarted = false;
   let sseBuffer = "";
   let rawModelText = "";
+  const backendStartedAt = timings.backendStartedAt || Date.now();
 
   while (true) {
+    if (signal?.aborted) {
+      try {
+        await reader.cancel();
+      } catch (error) {
+        console.warn("zappa stream reader cancel failed", error);
+      }
+      throw new DOMException("Rewrite aborted", "AbortError");
+    }
     const { value, done } = await reader.read();
     if (done) {
       break;
@@ -1380,6 +1549,10 @@ async function streamChatCompletionToHtml(response, pageUrl, onStreamHtml) {
       }
       const delta = parsed.choices?.[0]?.delta?.content;
       if (typeof delta === "string" && delta) {
+        const now = Date.now();
+        if (!timings.firstSseMs) {
+          timings.firstSseMs = now - backendStartedAt;
+        }
         rawModelText += delta;
         contentExtractor.push(delta);
       }
@@ -1392,6 +1565,7 @@ async function streamChatCompletionToHtml(response, pageUrl, onStreamHtml) {
     markdownStreamer.push(tail);
   }
   const finalHtml = markdownStreamer.finish();
+  timings.backendMs = Date.now() - backendStartedAt;
   if (!streamStarted) {
     streamStarted = true;
     onStreamHtml(buildReaderDocumentStart("Zappa Rewrite"));

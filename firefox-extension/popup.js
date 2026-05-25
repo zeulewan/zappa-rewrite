@@ -24,6 +24,8 @@ const DEFAULT_REWRITE_STATUS = {
   startedAt: 0,
   updatedAt: 0
 };
+const MAX_COMPLETED_REWRITE_STATUSES = 3;
+const STALE_ACTIVE_REWRITE_STATUS_MS = 120000;
 const DEV_SETTINGS_PATH = "dev-settings.json";
 const FORCED_DEV_SETTING_KEYS = [
   "configured",
@@ -170,6 +172,10 @@ async function initialize() {
   settings = normalizeSettings(applyForcedDevSettings(stored, devSettings));
   rewriteStatus = normalizeRewriteStatus(stored.rewriteStatus);
   rewriteStatuses = normalizeRewriteStatuses(stored.rewriteStatuses);
+  await browser.storage.local.set({
+    rewriteStatuses,
+    rewriteStatus: rewriteStatuses[0] || DEFAULT_REWRITE_STATUS
+  });
   currentHost = await getCurrentTabHost();
   render();
 }
@@ -342,7 +348,30 @@ function statusDetail(status) {
   if (status.startedAt && status.updatedAt) {
     parts.push(`${Math.max(0, Math.round((status.updatedAt - status.startedAt) / 1000))}s`);
   }
+  const timingSummary = formatTimingSummary(status.timings);
+  if (timingSummary) {
+    parts.push(timingSummary);
+  }
   return parts.join(" | ");
+}
+
+function formatTimingSummary(timings) {
+  if (!isPlainObject(timings)) {
+    return "";
+  }
+  const labels = [
+    ["captureMs", "cap"],
+    ["reduceMs", "reduce"],
+    ["backendHeadersMs", "headers"],
+    ["firstSseMs", "first"],
+    ["backendMs", "backend"],
+    ["markdownRenderMs", "render"],
+    ["totalMs", "total"]
+  ];
+  return labels
+    .filter(([key]) => Number.isFinite(timings[key]))
+    .map(([key, label]) => `${label} ${formatDuration(timings[key])}`)
+    .join(", ");
 }
 
 function isActiveStatus(state) {
@@ -388,19 +417,50 @@ function normalizeRewriteStatus(raw) {
     sourceChars: toNonNegativeInteger(raw.sourceChars),
     contentChars: toNonNegativeInteger(raw.contentChars),
     startedAt: toNonNegativeInteger(raw.startedAt),
-    updatedAt: toNonNegativeInteger(raw.updatedAt)
+    updatedAt: toNonNegativeInteger(raw.updatedAt),
+    timings: normalizeTimingMap(raw.timings)
   };
+}
+
+function normalizeTimingMap(raw) {
+  if (!isPlainObject(raw)) {
+    return {};
+  }
+  const timings = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) {
+      timings[key] = Math.round(number);
+    }
+  }
+  return timings;
 }
 
 function normalizeRewriteStatuses(raw) {
   if (!Array.isArray(raw)) {
     return [];
   }
-  return raw
+  return pruneRewriteStatuses(raw
     .map(normalizeRewriteStatus)
     .filter((status) => status.updatedAt)
     .sort(compareRewriteStatuses)
-    .slice(0, 8);
+    .slice(0, 8));
+}
+
+function pruneRewriteStatuses(statuses) {
+  const now = Date.now();
+  const active = [];
+  const completed = [];
+  for (const status of statuses) {
+    if (isActiveStatus(status.state)) {
+      if (now - status.updatedAt <= STALE_ACTIVE_REWRITE_STATUS_MS) {
+        active.push(status);
+      }
+      continue;
+    }
+    completed.push(status);
+  }
+  return [...active, ...completed.slice(0, MAX_COMPLETED_REWRITE_STATUSES)].slice(0, 8);
 }
 
 function compareRewriteStatuses(left, right) {
@@ -439,6 +499,13 @@ function toNonNegativeInteger(value) {
 
 function formatCount(value) {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatDuration(ms) {
+  if (ms >= 1000) {
+    return `${(ms / 1000).toFixed(ms >= 10000 ? 1 : 2)}s`;
+  }
+  return `${Math.round(ms)}ms`;
 }
 
 function shortUrl(url) {
