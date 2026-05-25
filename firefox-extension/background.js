@@ -902,6 +902,9 @@ function assetKindFromRequestType(type) {
 }
 
 function getSiteHostFromDetails(details) {
+  if (details.type === "main_frame") {
+    return hostnameFromUrl(details.url);
+  }
   if (details.documentUrl) {
     return hostnameFromUrl(details.documentUrl);
   }
