@@ -22,6 +22,39 @@ SITE_PORT = 18080
 BACKEND_PORT = 19778
 SITE_URL = f"http://127.0.0.1:{SITE_PORT}/"
 ADDON_ID = "zappa-rewrite@nova.local"
+TEST_SITE_BODY = """<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>zappa smoke test</title>
+    <style>.tracking { color: red; }</style>
+    <script>window.shouldNotReachModel = true;</script>
+  </head>
+  <body class="theme-shell" data-build-id="abc123">
+    <!-- this comment should be removed before the model sees the page -->
+    <header class="site-banner"><nav><a href="/one">one</a></nav></header>
+    <main id="content" class="layout" data-page-kind="article">
+      <article class="story-card" data-testid="story">
+        <h1 id="marker" class="headline">ORIGINAL PAGE</h1>
+        <figure class="media-wrap" data-component="hero">
+          <img
+            class="hero-image"
+            data-src="/images/hero-large.jpg"
+            src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+            srcset="/images/hero-small.jpg 320w, /images/hero-large.jpg 960w"
+            width="960"
+            height="540"
+            alt="A useful hero image">
+          <figcaption class="caption">Useful image caption.</figcaption>
+        </figure>
+        <p data-track="copy">Useful article text survives the reducer.</p>
+      </article>
+    </main>
+    <aside class="sponsored-widget">ad clutter</aside>
+    <footer class="site-footer">footer clutter</footer>
+  </body>
+</html>
+"""
 FIREFOX_BINARY_CANDIDATES = [
     Path("/snap/firefox/current/usr/lib/firefox/firefox"),
     Path("/snap/firefox/8191/usr/lib/firefox/firefox"),
@@ -37,18 +70,7 @@ class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 class TestSiteHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/" or self.path.startswith("/index"):
-            body = """<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>zappa smoke test</title>
-  </head>
-  <body>
-    <h1 id="marker">ORIGINAL PAGE</h1>
-  </body>
-</html>
-"""
-            self._write_response(200, "text/html; charset=utf-8", body)
+            self._write_response(200, "text/html; charset=utf-8", TEST_SITE_BODY)
             return
         self._write_response(404, "text/plain; charset=utf-8", "not found")
 
@@ -65,6 +87,8 @@ class TestSiteHandler(http.server.BaseHTTPRequestHandler):
 
 
 class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
+    last_source = ""
+
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/chat/completions":
             self._write_json(404, {"error": "not found"})
@@ -82,7 +106,19 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
             self._write_json(400, {"error": f"unexpected asset kind: {asset_kind}"})
             return
 
-        rewritten = source.replace("ORIGINAL PAGE", "REWRITTEN PAGE")
+        type(self).last_source = source
+        rewritten = """# REWRITTEN PAGE
+
+<figure>
+  <img src="http://127.0.0.1:18080/images/hero-large.jpg" width="960" height="540" alt="A useful hero image">
+  <figcaption>Useful image caption.</figcaption>
+</figure>
+
+Useful article text survives the reducer.
+
+- One useful bullet
+- Another useful bullet
+"""
 
         self._write_json(
             200,
@@ -93,7 +129,13 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": json.dumps({"content": rewritten}),
+                            "content": json.dumps(
+                                {
+                                    "format": "markdown",
+                                    "title": "Rewritten smoke test",
+                                    "content": rewritten,
+                                }
+                            ),
                         },
                         "finish_reason": "stop",
                     }
@@ -184,7 +226,7 @@ def get_extension_storage(driver: webdriver.Firefox, extension_uuid: str, key: s
     return result
 
 
-def load_site_and_read_marker(driver: webdriver.Firefox) -> str:
+def load_site_and_read_body_text(driver: webdriver.Firefox) -> str:
     driver.get(SITE_URL)
     try:
         wait_for_condition(
@@ -194,7 +236,37 @@ def load_site_and_read_marker(driver: webdriver.Firefox) -> str:
         )
     except TimeoutException as exc:
         raise RuntimeError("page did not finish loading") from exc
-    return driver.execute_script("return document.getElementById('marker')?.textContent || ''")
+    return driver.execute_script("return document.body?.innerText || ''")
+
+
+def assert_reduced_source(source: str) -> None:
+    forbidden_snippets = [
+        "<script",
+        "<style",
+        "<aside",
+        "<footer",
+        "class=",
+        "data-",
+        "srcset=",
+        "shouldNotReachModel",
+        "sponsored-widget",
+    ]
+    for snippet in forbidden_snippets:
+        if snippet in source:
+            raise RuntimeError(f"reduced source still contains {snippet!r}: {source[:1000]}")
+
+    required_snippets = [
+        "ORIGINAL PAGE",
+        "Useful article text survives the reducer.",
+        "Useful image caption.",
+        "src=\"http://127.0.0.1:18080/images/hero-large.jpg\"",
+        "width=\"960\"",
+        "height=\"540\"",
+        "alt=\"A useful hero image\"",
+    ]
+    for snippet in required_snippets:
+        if snippet not in source:
+            raise RuntimeError(f"reduced source is missing {snippet!r}: {source[:1000]}")
 
 
 def main() -> None:
@@ -223,11 +295,12 @@ def main() -> None:
                 print(f"Extension UUID: {extension_uuid}")
 
                 print("Verifying fresh install passes through by default...")
-                marker = load_site_and_read_marker(driver)
-                if marker != "ORIGINAL PAGE":
-                    raise RuntimeError(f"expected original marker before allowlist, got {marker!r}")
+                body_text = load_site_and_read_body_text(driver)
+                if "ORIGINAL PAGE" not in body_text:
+                    raise RuntimeError(f"expected original marker before allowlist, got {body_text!r}")
 
                 print("Verifying allowlisted site rewrites...")
+                MockPiBridgeHandler.last_source = ""
                 set_extension_storage(
                     driver,
                     extension_uuid,
@@ -237,18 +310,43 @@ def main() -> None:
                         "baseUrl": f"http://127.0.0.1:{BACKEND_PORT}",
                     },
                 )
-                marker = load_site_and_read_marker(driver)
-                if marker != "REWRITTEN PAGE":
-                    raise RuntimeError(f"expected rewritten marker after allowlist, got {marker!r}")
+                body_text = load_site_and_read_body_text(driver)
+                if "REWRITTEN PAGE" not in body_text:
+                    raise RuntimeError(f"expected rewritten marker after allowlist, got {body_text!r}")
+                if not driver.execute_script("return Boolean(document.querySelector('main.zappa-reader style, style'))"):
+                    raise RuntimeError("expected rendered Markdown document to include reader CSS")
+                rendered_image = driver.execute_script(
+                    """
+                    const image = document.querySelector('main.zappa-reader img');
+                    return image ? {
+                      src: image.getAttribute('src'),
+                      width: image.getAttribute('width'),
+                      height: image.getAttribute('height'),
+                      alt: image.getAttribute('alt'),
+                      loading: image.getAttribute('loading'),
+                      decoding: image.getAttribute('decoding')
+                    } : null;
+                    """
+                )
+                if rendered_image != {
+                    "src": "http://127.0.0.1:18080/images/hero-large.jpg",
+                    "width": "960",
+                    "height": "540",
+                    "alt": "A useful hero image",
+                    "loading": "lazy",
+                    "decoding": "async",
+                }:
+                    raise RuntimeError(f"rendered image lost sizing metadata: {rendered_image!r}")
+                assert_reduced_source(MockPiBridgeHandler.last_source)
                 rewrite_status = get_extension_storage(driver, extension_uuid, "rewriteStatus")
                 if not isinstance(rewrite_status, dict) or rewrite_status.get("state") != "done":
                     raise RuntimeError(f"expected done rewrite status, got {rewrite_status!r}")
 
                 print("Verifying global disable...")
                 set_extension_storage(driver, extension_uuid, {"enabled": False})
-                marker = load_site_and_read_marker(driver)
-                if marker != "ORIGINAL PAGE":
-                    raise RuntimeError(f"expected original marker after global disable, got {marker!r}")
+                body_text = load_site_and_read_body_text(driver)
+                if "ORIGINAL PAGE" not in body_text:
+                    raise RuntimeError(f"expected original marker after global disable, got {body_text!r}")
 
                 print("Verifying allowlist removal...")
                 set_extension_storage(
@@ -256,9 +354,9 @@ def main() -> None:
                     extension_uuid,
                     {"enabled": True, "allowedHosts": []},
                 )
-                marker = load_site_and_read_marker(driver)
-                if marker != "ORIGINAL PAGE":
-                    raise RuntimeError(f"expected original marker after allowlist removal, got {marker!r}")
+                body_text = load_site_and_read_body_text(driver)
+                if "ORIGINAL PAGE" not in body_text:
+                    raise RuntimeError(f"expected original marker after allowlist removal, got {body_text!r}")
 
                 print("Smoke test passed.")
             finally:

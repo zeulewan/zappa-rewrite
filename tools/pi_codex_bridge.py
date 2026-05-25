@@ -23,10 +23,11 @@ DEFAULT_TIMEOUT_SECONDS = 180
 
 BRIDGE_SYSTEM_PROMPT = """You are the backend for a JS-free browser page rewriter.
 
-Return one JSON object only: {"content":"..."}.
-The content string must be a complete rewritten HTML response body.
+Return one JSON object only: {"format":"markdown","title":"...","content":"..."}.
+The content string should be clean Markdown that the browser extension will render into static HTML.
 Do not include markdown fences, comments about the rewrite, scripts, inline event handlers, or javascript: URLs.
-Prefer semantic static HTML that preserves the source page's useful content, links, forms, and navigation.
+Use small safe HTML blocks only when Markdown is insufficient, such as figures with image width/height, complex tables, or forms.
+Preserve useful images, captions, links, dimensions, forms, and navigation.
 Remove ads, popups, autoplay, nag screens, tracking widgets, and distracting clutter."""
 
 
@@ -258,9 +259,14 @@ def normalize_model_output(text: str) -> str:
 
     parsed = parse_json_object(stripped)
     if isinstance(parsed, dict) and isinstance(parsed.get("content"), str):
-        return json.dumps({"content": parsed["content"]}, ensure_ascii=False)
+        normalized: dict[str, str] = {"content": parsed["content"]}
+        if isinstance(parsed.get("format"), str):
+            normalized["format"] = parsed["format"]
+        if isinstance(parsed.get("title"), str):
+            normalized["title"] = parsed["title"]
+        return json.dumps(normalized, ensure_ascii=False)
 
-    return json.dumps({"content": stripped}, ensure_ascii=False)
+    return json.dumps({"format": "markdown", "content": stripped}, ensure_ascii=False)
 
 
 def strip_markdown_fence(text: str) -> str:

@@ -64,10 +64,16 @@ class NormalizeModelOutputTests(unittest.TestCase):
             '{"content": "<main>OK</main>"}',
         )
 
+    def test_preserves_markdown_format_and_title(self) -> None:
+        self.assertEqual(
+            pi_codex_bridge.normalize_model_output('{"format":"markdown","title":"OK","content":"# OK"}'),
+            '{"content": "# OK", "format": "markdown", "title": "OK"}',
+        )
+
     def test_wraps_raw_html(self) -> None:
         self.assertEqual(
             pi_codex_bridge.normalize_model_output("<main>OK</main>"),
-            '{"content": "<main>OK</main>"}',
+            '{"format": "markdown", "content": "<main>OK</main>"}',
         )
 
     def test_strips_markdown_fence(self) -> None:
