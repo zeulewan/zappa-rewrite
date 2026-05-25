@@ -9,4 +9,5 @@ zappa.log.jsonl
 logs/
 dist/
 build/
+web-ext-artifacts/
 *.xpi

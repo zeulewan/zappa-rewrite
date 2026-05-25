@@ -18,7 +18,12 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "zappa-rewrite@nova.local"
+      "id": "zappa-rewrite@nova.local",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
     }
   },
   "browser_action": {
