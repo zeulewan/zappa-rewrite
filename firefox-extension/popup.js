@@ -7,7 +7,7 @@ const DEFAULT_SETTINGS = {
   baseUrl: "http://127.0.0.1:19777",
   model: "gpt-5.4-mini",
   apiKey: "",
-  maxInputChars: 1000000,
+  maxInputChars: 2000000,
   maxOutputTokens: 32768
 };
 

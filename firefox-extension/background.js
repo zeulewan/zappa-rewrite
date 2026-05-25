@@ -7,7 +7,7 @@ const DEFAULT_SETTINGS = {
   baseUrl: "http://127.0.0.1:19777",
   model: "gpt-5.4-mini",
   apiKey: "",
-  maxInputChars: 1000000,
+  maxInputChars: 2000000,
   maxOutputTokens: 32768
 };
 
@@ -531,21 +531,46 @@ function stringifyError(error) {
 }
 
 async function rewriteAsset({ url, host, assetKind, contentType, source, startedAt }) {
-  if (source.length > settingsCache.maxInputChars) {
-    throw new PassThroughResponse(`asset too large (${source.length} > ${settingsCache.maxInputChars})`);
+  const modelSource = prepareSourceForModel(assetKind, source);
+  if (modelSource.length > settingsCache.maxInputChars) {
+    throw new PassThroughResponse(
+      `asset too large after reduction (${modelSource.length} > ${settingsCache.maxInputChars}; raw ${source.length})`
+    );
   }
 
   await updateRewriteStatus({
     state: "rewriting",
     progress: 45,
     message: "Waiting for Pi",
-    detail: `${formatCount(source.length)} chars`,
+    detail: modelSource.length === source.length
+      ? `${formatCount(source.length)} chars`
+      : `${formatCount(source.length)} raw -> ${formatCount(modelSource.length)} reduced`,
     url,
     host,
     sourceChars: source.length,
     startedAt
   });
-  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source });
+  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source: modelSource });
+}
+
+function prepareSourceForModel(assetKind, source) {
+  if (assetKind !== "html") {
+    return source;
+  }
+
+  return source
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<script\b[^>]*\/?>/gi, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, "")
+    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/\s+srcset\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\s+integrity\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\s+nonce\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\s+data-[a-z0-9_:-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source }) {
