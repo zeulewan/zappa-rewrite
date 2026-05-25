@@ -19,6 +19,7 @@ const DEFAULT_REWRITE_STATUS = {
   detail: "",
   url: "",
   host: "",
+  tabId: -1,
   sourceChars: 0,
   contentChars: 0,
   startedAt: 0,
@@ -352,6 +353,8 @@ browser.webRequest.onBeforeSendHeaders.addListener(
     }
     const headers = details.requestHeaders ? [...details.requestHeaders] : [];
     upsertHeader(headers, "Accept-Encoding", "identity");
+    upsertHeader(headers, "Cache-Control", "no-cache");
+    upsertHeader(headers, "Pragma", "no-cache");
     return { requestHeaders: headers };
   },
   { urls: ["<all_urls>"], types: REQUEST_TYPES },
@@ -420,6 +423,7 @@ browser.webRequest.onBeforeRequest.addListener(
       detail: shortUrl(context.url),
       url: context.url,
       host: context.siteHost,
+      tabId: context.tabId,
       startedAt: context.startedAt
     });
 
@@ -705,10 +709,13 @@ function toPositiveInteger(value, fallback) {
 }
 
 async function updateRewriteStatus(update) {
+  const id = String(update.id || update.requestId || update.url || Date.now());
+  const context = requestContexts.get(id);
   const normalized = normalizeRewriteStatus({
     ...DEFAULT_REWRITE_STATUS,
     ...update,
-    id: String(update.id || update.requestId || update.url || Date.now()),
+    id,
+    tabId: update.tabId ?? context?.tabId ?? DEFAULT_REWRITE_STATUS.tabId,
     updatedAt: Date.now()
   });
   rewriteStatusesCache = mergeRewriteStatus(rewriteStatusesCache, normalized);
@@ -825,6 +832,7 @@ function normalizeRewriteStatus(raw) {
     detail: typeof raw.detail === "string" ? raw.detail : "",
     url: typeof raw.url === "string" ? raw.url : "",
     host: typeof raw.host === "string" ? raw.host : "",
+    tabId: toInteger(raw.tabId, -1),
     sourceChars: toNonNegativeInteger(raw.sourceChars),
     contentChars: toNonNegativeInteger(raw.contentChars),
     startedAt: toNonNegativeInteger(raw.startedAt),
@@ -859,6 +867,11 @@ function finalizeTimings(timings, startedAt) {
 function toNonNegativeInteger(value) {
   const number = Number.parseInt(value, 10);
   return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function toInteger(value, fallback = 0) {
+  const number = Number.parseInt(value, 10);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 function shouldRewriteRequest(details) {

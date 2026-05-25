@@ -19,6 +19,7 @@ const DEFAULT_REWRITE_STATUS = {
   detail: "",
   url: "",
   host: "",
+  tabId: -1,
   sourceChars: 0,
   contentChars: 0,
   startedAt: 0,
@@ -172,10 +173,6 @@ async function initialize() {
   settings = normalizeSettings(applyForcedDevSettings(stored, devSettings));
   rewriteStatus = normalizeRewriteStatus(stored.rewriteStatus);
   rewriteStatuses = normalizeRewriteStatuses(stored.rewriteStatuses);
-  await browser.storage.local.set({
-    rewriteStatuses,
-    rewriteStatus: rewriteStatuses[0] || DEFAULT_REWRITE_STATUS
-  });
   currentHost = await getCurrentTabHost();
   render();
 }
@@ -302,7 +299,7 @@ function renderRewriteStatusList(statuses) {
 
     const host = document.createElement("span");
     host.className = "rewrite-status-host";
-    host.textContent = status.host || shortUrl(status.url) || "Unknown site";
+    host.textContent = statusRowLabel(status);
 
     const state = document.createElement("span");
     state.className = "rewrite-status-state";
@@ -331,7 +328,16 @@ function statusMessage(status) {
     return "Idle";
   }
   const host = status.host ? ` on ${status.host}` : "";
-  return `${status.message || "Idle"}${host}`;
+  const tab = status.tabId >= 0 ? ` tab ${status.tabId}` : "";
+  return `${status.message || "Idle"}${host}${tab}`;
+}
+
+function statusRowLabel(status) {
+  const label = shortUrl(status.url) || status.host || "Unknown site";
+  if (status.tabId >= 0) {
+    return `${label} · tab ${status.tabId}`;
+  }
+  return label;
 }
 
 function statusDetail(status) {
@@ -414,6 +420,7 @@ function normalizeRewriteStatus(raw) {
     detail: typeof raw.detail === "string" ? raw.detail : "",
     url: typeof raw.url === "string" ? raw.url : "",
     host: typeof raw.host === "string" ? raw.host : "",
+    tabId: toInteger(raw.tabId, -1),
     sourceChars: toNonNegativeInteger(raw.sourceChars),
     contentChars: toNonNegativeInteger(raw.contentChars),
     startedAt: toNonNegativeInteger(raw.startedAt),
@@ -495,6 +502,11 @@ function toPositiveInteger(value, fallback) {
 function toNonNegativeInteger(value) {
   const number = Number.parseInt(value, 10);
   return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function toInteger(value, fallback = 0) {
+  const number = Number.parseInt(value, 10);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 function formatCount(value) {

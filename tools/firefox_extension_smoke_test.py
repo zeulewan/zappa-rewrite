@@ -382,7 +382,7 @@ def assert_popup_multiple_statuses(driver: webdriver.Firefox, extension_uuid: st
         "return Array.from(document.querySelectorAll('#rewrite-statuses .rewrite-status-host')).map(node => node.textContent)"
     )
     row_count = len(hosts)
-    if row_count != 2 or message != "2 rewrites active" or hosts != ["one.example", "two.example"]:
+    if row_count != 2 or message != "2 rewrites active" or hosts != ["one.example/", "two.example/"]:
         raise RuntimeError(f"multiple status UI failed: rows={row_count!r} message={message!r} hosts={hosts!r}")
 
 
@@ -481,6 +481,31 @@ def main() -> None:
                     or rewrite_statuses[0].get("state") != "done"
                 ):
                     raise RuntimeError(f"expected rewriteStatuses list with done status, got {rewrite_statuses!r}")
+
+                print("Verifying duplicate same-URL tabs rewrite independently...")
+                original_window = driver.current_window_handle
+                driver.execute_script("window.open(arguments[0], '_blank')", SITE_URL)
+                driver.switch_to.window(driver.window_handles[-1])
+                try:
+                    body_text = load_site_and_read_body_text(driver)
+                    if "REWRITTEN PAGE" not in body_text:
+                        raise RuntimeError(f"expected duplicated tab to rewrite, got {body_text!r}")
+                    rewrite_statuses = get_extension_storage(driver, extension_uuid, "rewriteStatuses")
+                    same_url_done = [
+                        status for status in rewrite_statuses
+                        if status.get("state") == "done" and status.get("url") == SITE_URL
+                    ]
+                    tab_ids = {
+                        status.get("tabId") for status in same_url_done
+                        if isinstance(status.get("tabId"), int) and status.get("tabId") >= 0
+                    }
+                    if len(same_url_done) < 2 or len(tab_ids) < 2:
+                        raise RuntimeError(
+                            f"expected two same-URL done statuses with distinct tabs, got {rewrite_statuses!r}"
+                        )
+                finally:
+                    driver.close()
+                    driver.switch_to.window(original_window)
                 assert_popup_multiple_statuses(driver, extension_uuid)
 
                 print("Verifying popup on/off switch...")
