@@ -129,9 +129,61 @@ button:hover {
   background: #651f1f;
 }
 
+.progress-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #d8e4dc;
+}
+
+.progress-bar {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #1b6b53;
+  transition: width 180ms ease;
+}
+
+.progress-bar-active {
+  background-image: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.35) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.35) 50%,
+    rgba(255, 255, 255, 0.35) 75%,
+    transparent 75%
+  );
+  background-size: 18px 18px;
+  animation: progress-stripes 800ms linear infinite;
+}
+
+.status-line {
+  margin: 8px 0 2px;
+  color: #1b6b53;
+  font-weight: 700;
+}
+
+.status-detail {
+  min-height: 16px;
+  margin: 0;
+  color: #546762;
+  overflow-wrap: anywhere;
+}
+
 .status {
   min-height: 18px;
   margin: 4px 2px 0;
   color: #1b6b53;
   font-weight: 600;
+}
+
+@keyframes progress-stripes {
+  from {
+    background-position: 18px 0;
+  }
+
+  to {
+    background-position: 0 0;
+  }
 }

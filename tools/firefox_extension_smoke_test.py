@@ -171,6 +171,19 @@ def set_extension_storage(driver: webdriver.Firefox, extension_uuid: str, values
         raise RuntimeError(f"failed to update extension storage: {result}")
 
 
+def get_extension_storage(driver: webdriver.Firefox, extension_uuid: str, key: str) -> object:
+    driver.get(f"moz-extension://{extension_uuid}/popup.html")
+    script = """
+        const key = arguments[0];
+        const done = arguments[arguments.length - 1];
+        browser.storage.local.get(key).then(value => done(value[key]), error => done({error: error.message}));
+    """
+    result = driver.execute_async_script(script, key)
+    if isinstance(result, dict) and "error" in result:
+        raise RuntimeError(f"failed to read extension storage: {result['error']}")
+    return result
+
+
 def load_site_and_read_marker(driver: webdriver.Firefox) -> str:
     driver.get(SITE_URL)
     try:
@@ -227,6 +240,9 @@ def main() -> None:
                 marker = load_site_and_read_marker(driver)
                 if marker != "REWRITTEN PAGE":
                     raise RuntimeError(f"expected rewritten marker after allowlist, got {marker!r}")
+                rewrite_status = get_extension_storage(driver, extension_uuid, "rewriteStatus")
+                if not isinstance(rewrite_status, dict) or rewrite_status.get("state") != "done":
+                    raise RuntimeError(f"expected done rewrite status, got {rewrite_status!r}")
 
                 print("Verifying global disable...")
                 set_extension_storage(driver, extension_uuid, {"enabled": False})

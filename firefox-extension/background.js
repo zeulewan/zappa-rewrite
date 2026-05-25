@@ -11,6 +11,18 @@ const DEFAULT_SETTINGS = {
   maxOutputTokens: 32768
 };
 
+const DEFAULT_REWRITE_STATUS = {
+  state: "idle",
+  progress: 0,
+  message: "Idle",
+  detail: "",
+  url: "",
+  host: "",
+  sourceChars: 0,
+  contentChars: 0,
+  startedAt: 0,
+  updatedAt: 0
+};
 const DEV_SETTINGS_PATH = "dev-settings.json";
 const FORCED_DEV_SETTING_KEYS = [
   "enabled",
@@ -118,8 +130,18 @@ browser.webRequest.onBeforeRequest.addListener(
       url: details.url,
       siteHost: getSiteHostFromDetails(details),
       assetKind,
-      responseHeaders: []
+      responseHeaders: [],
+      startedAt: Date.now()
     };
+    updateRewriteStatus({
+      state: "capturing",
+      progress: 15,
+      message: "Capturing page",
+      detail: shortUrl(context.url),
+      url: context.url,
+      host: context.siteHost,
+      startedAt: context.startedAt
+    });
 
     const filter = browser.webRequest.filterResponseData(details.requestId);
     const chunks = [];
@@ -146,28 +168,78 @@ browser.webRequest.onBeforeRequest.addListener(
         const originalText = decodeBytes(bodyBytes, charset);
 
         if (!originalText.trim()) {
+          await updateRewriteStatus({
+            state: "passed",
+            progress: 100,
+            message: "Passed through empty response",
+            detail: shortUrl(context.url),
+            url: context.url,
+            host: context.siteHost,
+            startedAt: context.startedAt
+          });
           filter.write(bodyBytes);
           filter.close();
           return;
         }
 
+        await updateRewriteStatus({
+          state: "queued",
+          progress: 30,
+          message: "Preparing rewrite",
+          detail: `${formatCount(originalText.length)} chars`,
+          url: context.url,
+          host: context.siteHost,
+          sourceChars: originalText.length,
+          startedAt: context.startedAt
+        });
         const rewrittenText = await rewriteAsset({
           url: context.url,
+          host: context.siteHost,
           assetKind: context.assetKind,
           contentType: getHeaderValue(context.responseHeaders, "content-type") || "",
-          source: originalText
+          source: originalText,
+          startedAt: context.startedAt
         });
 
         const finalText = sanitizeRewrittenAsset(context.assetKind, rewrittenText);
+        await updateRewriteStatus({
+          state: "done",
+          progress: 100,
+          message: "Rewrite complete",
+          detail: `${formatCount(originalText.length)} chars -> ${formatCount(finalText.length)} chars`,
+          url: context.url,
+          host: context.siteHost,
+          sourceChars: originalText.length,
+          contentChars: finalText.length,
+          startedAt: context.startedAt
+        });
         filter.write(new TextEncoder().encode(finalText));
         filter.close();
       } catch (error) {
         if (error instanceof PassThroughResponse) {
           console.warn("zappa pass-through", error.message);
+          await updateRewriteStatus({
+            state: "passed",
+            progress: 100,
+            message: "Passed through",
+            detail: error.message,
+            url: context.url,
+            host: context.siteHost,
+            startedAt: context.startedAt
+          });
           filter.write(bodyBytes);
           filter.close();
           return;
         }
+        await updateRewriteStatus({
+          state: "error",
+          progress: 100,
+          message: "Rewrite failed",
+          detail: stringifyError(error),
+          url: context.url,
+          host: context.siteHost,
+          startedAt: context.startedAt
+        });
         const errorBody = buildErrorBody(context.assetKind, stringifyError(error));
         filter.write(new TextEncoder().encode(errorBody));
         filter.close();
@@ -269,6 +341,41 @@ function normalizeBackend(backend) {
 function toPositiveInteger(value, fallback) {
   const number = Number.parseInt(value, 10);
   return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+async function updateRewriteStatus(update) {
+  try {
+    await browser.storage.local.set({
+      rewriteStatus: normalizeRewriteStatus({
+        ...DEFAULT_REWRITE_STATUS,
+        ...update,
+        updatedAt: Date.now()
+      })
+    });
+  } catch (error) {
+    console.warn("zappa status update failed", error);
+  }
+}
+
+function normalizeRewriteStatus(raw) {
+  const progress = Number.parseInt(raw.progress, 10);
+  return {
+    state: typeof raw.state === "string" ? raw.state : DEFAULT_REWRITE_STATUS.state,
+    progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0,
+    message: typeof raw.message === "string" ? raw.message : "",
+    detail: typeof raw.detail === "string" ? raw.detail : "",
+    url: typeof raw.url === "string" ? raw.url : "",
+    host: typeof raw.host === "string" ? raw.host : "",
+    sourceChars: toNonNegativeInteger(raw.sourceChars),
+    contentChars: toNonNegativeInteger(raw.contentChars),
+    startedAt: toNonNegativeInteger(raw.startedAt),
+    updatedAt: toNonNegativeInteger(raw.updatedAt)
+  };
+}
+
+function toNonNegativeInteger(value) {
+  const number = Number.parseInt(value, 10);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
 }
 
 function shouldRewriteRequest(details) {
@@ -423,11 +530,21 @@ function stringifyError(error) {
   return String(error);
 }
 
-async function rewriteAsset({ url, assetKind, contentType, source }) {
+async function rewriteAsset({ url, host, assetKind, contentType, source, startedAt }) {
   if (source.length > settingsCache.maxInputChars) {
     throw new PassThroughResponse(`asset too large (${source.length} > ${settingsCache.maxInputChars})`);
   }
 
+  await updateRewriteStatus({
+    state: "rewriting",
+    progress: 45,
+    message: "Waiting for Pi",
+    detail: `${formatCount(source.length)} chars`,
+    url,
+    host,
+    sourceChars: source.length,
+    startedAt
+  });
   return rewriteWithOpenAICompatible({ url, assetKind, contentType, source });
 }
 
@@ -513,4 +630,17 @@ function parseModelJson(text) {
 
 function trimTrailingSlash(value) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+function shortUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.pathname}`.slice(0, 120);
+  } catch (error) {
+    return url.slice(0, 120);
+  }
+}
+
+function formatCount(value) {
+  return new Intl.NumberFormat("en-US").format(value);
 }

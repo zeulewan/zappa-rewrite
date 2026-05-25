@@ -11,6 +11,18 @@ const DEFAULT_SETTINGS = {
   maxOutputTokens: 32768
 };
 
+const DEFAULT_REWRITE_STATUS = {
+  state: "idle",
+  progress: 0,
+  message: "Idle",
+  detail: "",
+  url: "",
+  host: "",
+  sourceChars: 0,
+  contentChars: 0,
+  startedAt: 0,
+  updatedAt: 0
+};
 const DEV_SETTINGS_PATH = "dev-settings.json";
 const FORCED_DEV_SETTING_KEYS = [
   "enabled",
@@ -24,6 +36,9 @@ const FORCED_DEV_SETTING_KEYS = [
 ];
 const currentSiteLabel = document.getElementById("current-site");
 const toggleSiteButton = document.getElementById("toggle-site");
+const rewriteProgress = document.getElementById("rewrite-progress");
+const rewriteStatusMessage = document.getElementById("rewrite-status-message");
+const rewriteStatusDetail = document.getElementById("rewrite-status-detail");
 const settingsForm = document.getElementById("settings-form");
 const backendInput = document.getElementById("backend");
 const baseUrlInput = document.getElementById("base-url");
@@ -35,10 +50,19 @@ const allowedSitesList = document.getElementById("allowed-sites");
 const statusLabel = document.getElementById("status");
 
 let settings = { ...DEFAULT_SETTINGS };
+let rewriteStatus = { ...DEFAULT_REWRITE_STATUS };
 let currentHost = "";
 
 initialize().catch((error) => {
   showStatus(`Failed to load popup: ${error.message}`, true);
+});
+
+browser.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes.rewriteStatus) {
+    return;
+  }
+  rewriteStatus = normalizeRewriteStatus(changes.rewriteStatus.newValue || DEFAULT_REWRITE_STATUS);
+  renderRewriteStatus();
 });
 
 toggleSiteButton.addEventListener("click", async () => {
@@ -88,8 +112,12 @@ async function initialize() {
   const devSettings = await loadDevSettings();
   const defaults = normalizeSettings({ ...DEFAULT_SETTINGS, ...devSettings });
   Object.assign(DEFAULT_SETTINGS, defaults);
-  const stored = await browser.storage.local.get(DEFAULT_SETTINGS);
+  const stored = await browser.storage.local.get({
+    ...DEFAULT_SETTINGS,
+    rewriteStatus: DEFAULT_REWRITE_STATUS
+  });
   settings = normalizeSettings(applyForcedDevSettings(stored, devSettings));
+  rewriteStatus = normalizeRewriteStatus(stored.rewriteStatus);
   currentHost = await getCurrentTabHost();
   render();
 }
@@ -131,6 +159,7 @@ function render() {
   apiKeyInput.value = settings.apiKey;
   maxInputCharsInput.value = String(settings.maxInputChars);
   maxOutputTokensInput.value = String(settings.maxOutputTokens);
+  renderRewriteStatus();
 
   if (currentHost) {
     currentSiteLabel.textContent = currentHost;
@@ -179,6 +208,42 @@ function render() {
   }
 }
 
+function renderRewriteStatus() {
+  rewriteProgress.style.width = `${rewriteStatus.progress}%`;
+  rewriteProgress.classList.toggle("progress-bar-active", isActiveStatus(rewriteStatus.state));
+  rewriteStatusMessage.textContent = statusMessage(rewriteStatus);
+  rewriteStatusDetail.textContent = statusDetail(rewriteStatus);
+}
+
+function statusMessage(status) {
+  if (!status.updatedAt) {
+    return "Idle";
+  }
+  const host = status.host ? ` on ${status.host}` : "";
+  return `${status.message || "Idle"}${host}`;
+}
+
+function statusDetail(status) {
+  const parts = [];
+  if (status.detail) {
+    parts.push(status.detail);
+  }
+  if (status.sourceChars) {
+    parts.push(`${formatCount(status.sourceChars)} in`);
+  }
+  if (status.contentChars) {
+    parts.push(`${formatCount(status.contentChars)} out`);
+  }
+  if (status.startedAt && status.updatedAt) {
+    parts.push(`${Math.max(0, Math.round((status.updatedAt - status.startedAt) / 1000))}s`);
+  }
+  return parts.join(" | ");
+}
+
+function isActiveStatus(state) {
+  return state === "capturing" || state === "queued" || state === "rewriting";
+}
+
 function normalizeSettings(raw) {
   return {
     enabled: Boolean(raw.enabled),
@@ -202,6 +267,25 @@ function normalizeSettings(raw) {
   };
 }
 
+function normalizeRewriteStatus(raw) {
+  if (!isPlainObject(raw)) {
+    return { ...DEFAULT_REWRITE_STATUS };
+  }
+  const progress = Number.parseInt(raw.progress, 10);
+  return {
+    state: typeof raw.state === "string" ? raw.state : DEFAULT_REWRITE_STATUS.state,
+    progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0,
+    message: typeof raw.message === "string" ? raw.message : "",
+    detail: typeof raw.detail === "string" ? raw.detail : "",
+    url: typeof raw.url === "string" ? raw.url : "",
+    host: typeof raw.host === "string" ? raw.host : "",
+    sourceChars: toNonNegativeInteger(raw.sourceChars),
+    contentChars: toNonNegativeInteger(raw.contentChars),
+    startedAt: toNonNegativeInteger(raw.startedAt),
+    updatedAt: toNonNegativeInteger(raw.updatedAt)
+  };
+}
+
 function normalizeBackend(backend) {
   if (backend === "openai_compatible") {
     return "openai_compatible";
@@ -220,6 +304,15 @@ function isPlainObject(value) {
 function toPositiveInteger(value, fallback) {
   const number = Number.parseInt(value, 10);
   return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function toNonNegativeInteger(value) {
+  const number = Number.parseInt(value, 10);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function formatCount(value) {
+  return new Intl.NumberFormat("en-US").format(value);
 }
 
 async function getCurrentTabHost() {
