@@ -10,5 +10,6 @@ logs/
 dist/
 build/
 web-ext-artifacts/
+.worktrees/
 firefox-extension/dev-settings.json
 *.xpi
