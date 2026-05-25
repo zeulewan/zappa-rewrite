@@ -25,7 +25,6 @@ const DEFAULT_REWRITE_STATUS = {
 };
 const DEV_SETTINGS_PATH = "dev-settings.json";
 const FORCED_DEV_SETTING_KEYS = [
-  "enabled",
   "configured",
   "backend",
   "baseUrl",
@@ -34,6 +33,20 @@ const FORCED_DEV_SETTING_KEYS = [
   "maxInputChars",
   "maxOutputTokens"
 ];
+const SETTING_KEYS = [
+  "enabled",
+  "configured",
+  "allowedHosts",
+  "disabledHosts",
+  "backend",
+  "baseUrl",
+  "model",
+  "apiKey",
+  "maxInputChars",
+  "maxOutputTokens"
+];
+const extensionEnabledInput = document.getElementById("extension-enabled");
+const extensionStateLabel = document.getElementById("extension-state");
 const currentSiteLabel = document.getElementById("current-site");
 const toggleSiteButton = document.getElementById("toggle-site");
 const rewriteProgress = document.getElementById("rewrite-progress");
@@ -52,17 +65,47 @@ const statusLabel = document.getElementById("status");
 let settings = { ...DEFAULT_SETTINGS };
 let rewriteStatus = { ...DEFAULT_REWRITE_STATUS };
 let currentHost = "";
+let currentTabId = null;
 
 initialize().catch((error) => {
   showStatus(`Failed to load popup: ${error.message}`, true);
 });
 
 browser.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes.rewriteStatus) {
+  if (areaName !== "local") {
     return;
   }
-  rewriteStatus = normalizeRewriteStatus(changes.rewriteStatus.newValue || DEFAULT_REWRITE_STATUS);
-  renderRewriteStatus();
+
+  let settingsChanged = false;
+  for (const key of SETTING_KEYS) {
+    if (changes[key]) {
+      settings[key] = changes[key].newValue;
+      settingsChanged = true;
+    }
+  }
+  if (settingsChanged) {
+    settings = normalizeSettings(settings);
+  }
+
+  if (changes.rewriteStatus) {
+    rewriteStatus = normalizeRewriteStatus(changes.rewriteStatus.newValue || DEFAULT_REWRITE_STATUS);
+  }
+
+  if (settingsChanged || changes.rewriteStatus) {
+    render();
+  }
+});
+
+extensionEnabledInput.addEventListener("change", async () => {
+  settings.enabled = extensionEnabledInput.checked;
+  await browser.storage.local.set({ enabled: settings.enabled });
+  if (currentHost && settings.allowedHosts.includes(currentHost)) {
+    await reloadCurrentTab();
+    showStatus(settings.enabled ? "Zappa is on. Reloading this tab." : "Zappa is off. Reloading this tab.");
+  } else {
+    showStatus(settings.enabled ? "Zappa is on." : "Zappa is off.");
+  }
+  render();
 });
 
 toggleSiteButton.addEventListener("click", async () => {
@@ -81,6 +124,7 @@ toggleSiteButton.addEventListener("click", async () => {
 
   settings.allowedHosts = Array.from(allowedHosts).sort();
   await browser.storage.local.set({ allowedHosts: settings.allowedHosts });
+  await reloadCurrentTab();
   render();
 });
 
@@ -153,6 +197,8 @@ function applyForcedDevSettings(stored, devSettings) {
 }
 
 function render() {
+  extensionEnabledInput.checked = settings.enabled;
+  extensionStateLabel.textContent = settings.enabled ? "On" : "Off";
   backendInput.value = settings.backend;
   baseUrlInput.value = settings.baseUrl;
   modelInput.value = settings.model;
@@ -317,6 +363,7 @@ function formatCount(value) {
 
 async function getCurrentTabHost() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  currentTabId = Number.isInteger(tab?.id) ? tab.id : null;
   if (!tab || !tab.url) {
     return "";
   }
@@ -328,6 +375,17 @@ async function getCurrentTabHost() {
     return url.hostname.toLowerCase();
   } catch (error) {
     return "";
+  }
+}
+
+async function reloadCurrentTab() {
+  if (!Number.isInteger(currentTabId)) {
+    return;
+  }
+  try {
+    await browser.tabs.reload(currentTabId);
+  } catch (error) {
+    console.warn("zappa tab reload failed", error);
   }
 }
 

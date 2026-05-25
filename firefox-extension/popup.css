@@ -32,6 +32,69 @@ body {
   color: #4b5b57;
 }
 
+.switch-control {
+  flex: 0 0 auto;
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  margin: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch-control input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.switch-track {
+  position: relative;
+  display: block;
+  width: 48px;
+  height: 26px;
+  border: 1px solid #aebfb6;
+  border-radius: 999px;
+  background: #cfdad3;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(22, 33, 31, 0.18);
+  transition: transform 160ms ease;
+}
+
+.switch-control input:checked + .switch-track {
+  border-color: #1b6b53;
+  background: #1b6b53;
+}
+
+.switch-control input:checked + .switch-track .switch-thumb {
+  transform: translateX(22px);
+}
+
+.switch-control input:focus-visible + .switch-track {
+  outline: 2px solid #1b6b53;
+  outline-offset: 2px;
+}
+
+.switch-label {
+  color: #4b5b57;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .card {
   margin-bottom: 12px;
   padding: 12px;

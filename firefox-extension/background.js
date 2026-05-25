@@ -25,7 +25,6 @@ const DEFAULT_REWRITE_STATUS = {
 };
 const DEV_SETTINGS_PATH = "dev-settings.json";
 const FORCED_DEV_SETTING_KEYS = [
-  "enabled",
   "configured",
   "backend",
   "baseUrl",

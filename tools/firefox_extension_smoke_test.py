@@ -226,6 +226,28 @@ def get_extension_storage(driver: webdriver.Firefox, extension_uuid: str, key: s
     return result
 
 
+def set_extension_enabled_from_popup(driver: webdriver.Firefox, extension_uuid: str, enabled: bool) -> None:
+    driver.get(f"moz-extension://{extension_uuid}/popup.html")
+    script = """
+        const enabled = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const input = document.getElementById("extension-enabled");
+        if (!input) {
+          done("error:missing switch");
+          return;
+        }
+        input.checked = enabled;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        browser.storage.local.get("enabled").then(
+          value => done(value.enabled === enabled ? "ok" : `error:stored ${value.enabled}`),
+          error => done(`error:${error.message}`)
+        );
+    """
+    result = driver.execute_async_script(script, enabled)
+    if result != "ok":
+        raise RuntimeError(f"failed to toggle extension from popup: {result}")
+
+
 def load_site_and_read_body_text(driver: webdriver.Firefox) -> str:
     driver.get(SITE_URL)
     try:
@@ -342,11 +364,15 @@ def main() -> None:
                 if not isinstance(rewrite_status, dict) or rewrite_status.get("state") != "done":
                     raise RuntimeError(f"expected done rewrite status, got {rewrite_status!r}")
 
-                print("Verifying global disable...")
-                set_extension_storage(driver, extension_uuid, {"enabled": False})
+                print("Verifying popup on/off switch...")
+                set_extension_enabled_from_popup(driver, extension_uuid, False)
                 body_text = load_site_and_read_body_text(driver)
                 if "ORIGINAL PAGE" not in body_text:
-                    raise RuntimeError(f"expected original marker after global disable, got {body_text!r}")
+                    raise RuntimeError(f"expected original marker after popup switch off, got {body_text!r}")
+                set_extension_enabled_from_popup(driver, extension_uuid, True)
+                body_text = load_site_and_read_body_text(driver)
+                if "REWRITTEN PAGE" not in body_text:
+                    raise RuntimeError(f"expected rewritten marker after popup switch on, got {body_text!r}")
 
                 print("Verifying allowlist removal...")
                 set_extension_storage(
