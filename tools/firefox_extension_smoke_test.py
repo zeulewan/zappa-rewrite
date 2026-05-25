@@ -30,6 +30,14 @@ TEST_SITE_BODY = """<!doctype html>
     <title>zappa smoke test</title>
     <style>.tracking { color: red; }</style>
     <script>window.shouldNotReachModel = true;</script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "NewsArticle",
+        "headline": "ORIGINAL PAGE",
+        "articleBody": "Structured metadata paragraph one should survive even when it is not rendered in the page body. It gives the reducer a fallback for JavaScript-heavy article pages.\\n\\nStructured metadata paragraph two should also survive so a late article section is not chopped off before the model sees it."
+      }
+    </script>
   </head>
   <body class="theme-shell" data-build-id="abc123">
     <!-- this comment should be removed before the model sees the page -->
@@ -309,6 +317,8 @@ def assert_reduced_source(source: str) -> None:
     required_snippets = [
         "ORIGINAL PAGE",
         "Useful article text survives the reducer.",
+        "Structured metadata paragraph one should survive",
+        "Structured metadata paragraph two should also survive",
         "Useful image caption.",
         "src=\"http://127.0.0.1:18080/images/hero-large.jpg\"",
         "width=\"960\"",
