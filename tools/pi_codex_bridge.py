@@ -63,6 +63,61 @@ def build_pi_prompt(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def summarize_rewrite_request(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        source = parsed.get("source")
+        return {
+            "url": parsed.get("url") if isinstance(parsed.get("url"), str) else "",
+            "asset_kind": parsed.get("asset_kind") if isinstance(parsed.get("asset_kind"), str) else "",
+            "content_type": parsed.get("content_type") if isinstance(parsed.get("content_type"), str) else "",
+            "source_chars": len(source) if isinstance(source, str) else 0,
+        }
+    return {
+        "url": "",
+        "asset_kind": "",
+        "content_type": "",
+        "source_chars": 0,
+    }
+
+
+def summarize_rewrite_output(content: str) -> dict[str, int]:
+    parsed = parse_json_object(content)
+    if isinstance(parsed, dict) and isinstance(parsed.get("content"), str):
+        return {"content_chars": len(parsed["content"])}
+    return {"content_chars": len(content)}
+
+
+def log_rewrite_start(client: str, model: str, summary: dict[str, Any]) -> None:
+    sys.stderr.write(
+        "[pi-codex-bridge] "
+        f"{client} rewrite start model={model} "
+        f"kind={summary['asset_kind'] or '-'} "
+        f"source_chars={summary['source_chars']} "
+        f"url={summary['url'] or '-'}\n"
+    )
+    sys.stderr.flush()
+
+
+def log_rewrite_end(client: str, status: str, elapsed_seconds: float, summary: dict[str, Any]) -> None:
+    fields = " ".join(f"{key}={value}" for key, value in summary.items())
+    sys.stderr.write(
+        "[pi-codex-bridge] "
+        f"{client} rewrite {status} elapsed={elapsed_seconds:.2f}s {fields}\n"
+    )
+    sys.stderr.flush()
+
+
 def run_pi_rewrite(
     *,
     pi_bin: str,
@@ -246,6 +301,10 @@ def make_handler(
                 if not isinstance(messages, list):
                     raise PiBridgeError("request must contain a messages array")
                 model = payload.get("model") if isinstance(payload.get("model"), str) else default_model
+                client = self.address_string()
+                request_summary = summarize_rewrite_request(messages)
+                log_rewrite_start(client, model or default_model, request_summary)
+                started = time.monotonic()
                 content = run_pi_rewrite(
                     pi_bin=pi_bin,
                     provider=provider,
@@ -255,8 +314,21 @@ def make_handler(
                     timeout_seconds=timeout_seconds,
                     messages=messages,
                 )
+                output_summary = summarize_rewrite_output(content)
+                log_rewrite_end(
+                    client,
+                    "ok",
+                    time.monotonic() - started,
+                    {**request_summary, **output_summary},
+                )
                 self._send_json(200, build_chat_completion_response(model or default_model, content))
             except Exception as error:  # noqa: BLE001
+                log_rewrite_end(
+                    self.address_string(),
+                    "error",
+                    time.monotonic() - started if "started" in locals() else 0,
+                    {"message": str(error)},
+                )
                 self._send_json(500, {"error": str(error)})
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A003
