@@ -10,6 +10,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const REQUEST_TYPES = ["main_frame", "sub_frame", "script", "stylesheet"];
+const OPENAI_COMPATIBLE_BACKENDS = ["openai_compatible", "codex_app_server"];
 const CONTENT_TYPE_BY_KIND = {
   html: "text/html; charset=utf-8",
   css: "text/css; charset=utf-8",
@@ -192,7 +193,7 @@ function normalizeSettings(raw) {
   return {
     enabled: Boolean(raw.enabled),
     disabledHosts,
-    backend: raw.backend === "openai_compatible" ? "openai_compatible" : "ollama",
+    backend: normalizeBackend(raw.backend),
     baseUrl: typeof raw.baseUrl === "string" && raw.baseUrl.trim()
       ? raw.baseUrl.trim()
       : DEFAULT_SETTINGS.baseUrl,
@@ -203,6 +204,16 @@ function normalizeSettings(raw) {
     maxInputChars: toPositiveInteger(raw.maxInputChars, DEFAULT_SETTINGS.maxInputChars),
     maxOutputTokens: toPositiveInteger(raw.maxOutputTokens, DEFAULT_SETTINGS.maxOutputTokens)
   };
+}
+
+function normalizeBackend(backend) {
+  if (backend === "codex_app_server") {
+    return "codex_app_server";
+  }
+  if (backend === "openai_compatible") {
+    return "openai_compatible";
+  }
+  return "ollama";
 }
 
 function toPositiveInteger(value, fallback) {
@@ -372,7 +383,10 @@ async function rewriteAsset({ url, assetKind, contentType, source }) {
   if (settingsCache.backend === "ollama") {
     return rewriteWithOllama({ url, assetKind, contentType, source });
   }
-  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source });
+  if (OPENAI_COMPATIBLE_BACKENDS.includes(settingsCache.backend)) {
+    return rewriteWithOpenAICompatible({ url, assetKind, contentType, source });
+  }
+  throw new Error(`unknown backend: ${settingsCache.backend}`);
 }
 
 async function rewriteWithOllama({ url, assetKind, contentType, source }) {

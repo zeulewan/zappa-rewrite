@@ -17,7 +17,7 @@ Verified:
 
 ## Quick Start
 
-Start Ollama:
+### Ollama
 
 ```bash
 ollama pull qwen3:4b
@@ -29,6 +29,20 @@ Load the extension in Firefox:
 1. Open `about:debugging#/runtime/this-firefox`
 2. Click `Load Temporary Add-on...`
 3. Select `firefox-extension/manifest.json`
+
+### Codex app-server
+
+Run the Codex bridge:
+
+```bash
+python3 tools/codex_app_server_bridge.py
+```
+
+Use these extension settings:
+
+- Backend: `Codex app-server bridge`
+- Base URL: `http://127.0.0.1:19777`
+- Model: `gpt-5.4-mini`
 
 Run the Python tests:
 
