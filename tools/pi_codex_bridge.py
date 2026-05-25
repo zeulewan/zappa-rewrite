@@ -180,6 +180,112 @@ def run_pi_rewrite(
             pass
 
 
+def run_pi_rewrite_stream(
+    *,
+    pi_bin: str,
+    provider: str,
+    model: str,
+    thinking: str,
+    cwd: Path,
+    timeout_seconds: int,
+    messages: list[dict[str, Any]],
+):
+    prompt = build_pi_prompt(messages)
+    prompt_path = write_prompt_file(prompt, cwd)
+    process: subprocess.Popen[str] | None = None
+    try:
+        command = [
+            pi_bin,
+            "--mode",
+            "json",
+            "--print",
+            "--no-session",
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-context-files",
+            "--provider",
+            provider,
+            "--model",
+            model,
+            "--thinking",
+            thinking,
+            "--system-prompt",
+            BRIDGE_SYSTEM_PROMPT,
+            f"@{prompt_path}",
+        ]
+        env = os.environ.copy()
+        env.setdefault("PI_TELEMETRY", "0")
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdout is not None
+        started = time.monotonic()
+        deltas: list[str] = []
+        fallback = ""
+        text_end = ""
+
+        for line in process.stdout:
+            if time.monotonic() - started > timeout_seconds:
+                process.kill()
+                raise PiBridgeError(f"pi timed out after {timeout_seconds}s")
+
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise PiBridgeError(f"pi emitted invalid JSON: {stripped[:200]!r}") from exc
+
+            assistant_event = event.get("assistantMessageEvent")
+            if isinstance(assistant_event, dict):
+                event_type = assistant_event.get("type")
+                if event_type == "text_delta" and isinstance(assistant_event.get("delta"), str):
+                    delta = assistant_event["delta"]
+                    deltas.append(delta)
+                    yield delta
+                elif event_type == "text_end" and isinstance(assistant_event.get("content"), str):
+                    text_end = assistant_event["content"]
+
+            if event.get("type") in {"message_end", "turn_end"}:
+                message_text = extract_text_from_message(event.get("message"))
+                if message_text:
+                    fallback = message_text
+
+            if event.get("type") == "agent_end":
+                messages_value = event.get("messages")
+                if isinstance(messages_value, list):
+                    for message in reversed(messages_value):
+                        if isinstance(message, dict) and message.get("role") == "assistant":
+                            message_text = extract_text_from_message(message)
+                            if message_text:
+                                fallback = message_text
+                                break
+
+        return_code = process.wait(timeout=5)
+        if return_code != 0:
+            stderr = process.stderr.read().strip() if process.stderr else ""
+            raise PiBridgeError(f"pi exited with {return_code}: {stderr[-2000:]}")
+
+        if not deltas:
+            final_text = text_end or fallback
+            if final_text:
+                yield final_text
+    finally:
+        if process and process.poll() is None:
+            process.kill()
+        try:
+            prompt_path.unlink()
+        except OSError:
+            pass
+
+
 def write_prompt_file(prompt: str, cwd: Path) -> Path:
     cwd.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -328,10 +434,20 @@ def make_handler(
                 if not isinstance(messages, list):
                     raise PiBridgeError("request must contain a messages array")
                 model = payload.get("model") if isinstance(payload.get("model"), str) else default_model
+                stream = payload.get("stream") is True
                 client = self.address_string()
                 request_summary = summarize_rewrite_request(messages)
                 log_rewrite_start(client, model or default_model, request_summary)
                 started = time.monotonic()
+                if stream:
+                    self._stream_chat_completion(
+                        model=model or default_model,
+                        messages=messages,
+                        request_summary=request_summary,
+                        started=started,
+                        client=client,
+                    )
+                    return
                 content = run_pi_rewrite(
                     pi_bin=pi_bin,
                     provider=provider,
@@ -388,6 +504,66 @@ def make_handler(
             self.end_headers()
             self.wfile.write(encoded)
 
+        def _stream_chat_completion(
+            self,
+            *,
+            model: str,
+            messages: list[dict[str, Any]],
+            request_summary: dict[str, Any],
+            started: float,
+            client: str,
+        ) -> None:
+            self.send_response(200)
+            self._send_common_headers()
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+
+            raw_parts: list[str] = []
+            try:
+                for delta in run_pi_rewrite_stream(
+                    pi_bin=pi_bin,
+                    provider=provider,
+                    model=model,
+                    thinking=thinking,
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    messages=messages,
+                ):
+                    raw_parts.append(delta)
+                    self._send_sse_data(build_chat_completion_stream_chunk(model, delta))
+
+                content = normalize_model_output("".join(raw_parts))
+                output_summary = summarize_rewrite_output(content)
+                log_rewrite_end(
+                    client,
+                    "ok",
+                    time.monotonic() - started,
+                    {**request_summary, **output_summary},
+                )
+                self._send_sse_data(build_chat_completion_stream_chunk(model, "", finish_reason="stop"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except Exception as error:  # noqa: BLE001
+                log_rewrite_end(
+                    client,
+                    "error",
+                    time.monotonic() - started,
+                    {"message": str(error)},
+                )
+                self._send_sse_data({"error": str(error)})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        def _send_sse_data(self, body: dict[str, Any]) -> None:
+            encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.wfile.write(b"data: ")
+            self.wfile.write(encoded)
+            self.wfile.write(b"\n\n")
+            self.wfile.flush()
+
         def _send_common_headers(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -410,6 +586,22 @@ def build_chat_completion_response(model: str, content: str) -> dict[str, Any]:
                     "content": content,
                 },
                 "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+def build_chat_completion_stream_chunk(model: str, delta: str, finish_reason: str | None = None) -> dict[str, Any]:
+    return {
+        "id": f"chatcmpl-pi-{int(time.time() * 1000)}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": delta} if delta else {},
+                "finish_reason": finish_reason,
             }
         ],
     }

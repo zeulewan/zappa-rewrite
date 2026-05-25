@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const DEFAULT_REWRITE_STATUS = {
+  id: "",
   state: "idle",
   progress: 0,
   message: "Idle",
@@ -52,6 +53,7 @@ const toggleSiteButton = document.getElementById("toggle-site");
 const rewriteProgress = document.getElementById("rewrite-progress");
 const rewriteStatusMessage = document.getElementById("rewrite-status-message");
 const rewriteStatusDetail = document.getElementById("rewrite-status-detail");
+const rewriteStatusesList = document.getElementById("rewrite-statuses");
 const settingsForm = document.getElementById("settings-form");
 const backendInput = document.getElementById("backend");
 const baseUrlInput = document.getElementById("base-url");
@@ -64,6 +66,7 @@ const statusLabel = document.getElementById("status");
 
 let settings = { ...DEFAULT_SETTINGS };
 let rewriteStatus = { ...DEFAULT_REWRITE_STATUS };
+let rewriteStatuses = [];
 let currentHost = "";
 let currentTabId = null;
 
@@ -90,8 +93,11 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   if (changes.rewriteStatus) {
     rewriteStatus = normalizeRewriteStatus(changes.rewriteStatus.newValue || DEFAULT_REWRITE_STATUS);
   }
+  if (changes.rewriteStatuses) {
+    rewriteStatuses = normalizeRewriteStatuses(changes.rewriteStatuses.newValue);
+  }
 
-  if (settingsChanged || changes.rewriteStatus) {
+  if (settingsChanged || changes.rewriteStatus || changes.rewriteStatuses) {
     render();
   }
 });
@@ -158,10 +164,12 @@ async function initialize() {
   Object.assign(DEFAULT_SETTINGS, defaults);
   const stored = await browser.storage.local.get({
     ...DEFAULT_SETTINGS,
-    rewriteStatus: DEFAULT_REWRITE_STATUS
+    rewriteStatus: DEFAULT_REWRITE_STATUS,
+    rewriteStatuses: []
   });
   settings = normalizeSettings(applyForcedDevSettings(stored, devSettings));
   rewriteStatus = normalizeRewriteStatus(stored.rewriteStatus);
+  rewriteStatuses = normalizeRewriteStatuses(stored.rewriteStatuses);
   currentHost = await getCurrentTabHost();
   render();
 }
@@ -255,10 +263,61 @@ function render() {
 }
 
 function renderRewriteStatus() {
-  rewriteProgress.style.width = `${rewriteStatus.progress}%`;
-  rewriteProgress.classList.toggle("progress-bar-active", isActiveStatus(rewriteStatus.state));
-  rewriteStatusMessage.textContent = statusMessage(rewriteStatus);
-  rewriteStatusDetail.textContent = statusDetail(rewriteStatus);
+  const statuses = rewriteStatuses.length ? rewriteStatuses : (rewriteStatus.updatedAt ? [rewriteStatus] : []);
+  const activeStatuses = statuses.filter((status) => isActiveStatus(status.state));
+  const primaryStatus = activeStatuses[0] || statuses[0] || rewriteStatus;
+
+  rewriteProgress.style.width = `${primaryStatus.progress || 0}%`;
+  rewriteProgress.classList.toggle("progress-bar-active", isActiveStatus(primaryStatus.state));
+
+  if (activeStatuses.length > 1) {
+    rewriteStatusMessage.textContent = `${activeStatuses.length} rewrites active`;
+  } else {
+    rewriteStatusMessage.textContent = statusMessage(primaryStatus);
+  }
+  rewriteStatusDetail.textContent = statusDetail(primaryStatus);
+  renderRewriteStatusList(statuses);
+}
+
+function renderRewriteStatusList(statuses) {
+  rewriteStatusesList.textContent = "";
+  if (!statuses.length) {
+    return;
+  }
+
+  for (const status of statuses.slice(0, 8)) {
+    const item = document.createElement("li");
+    item.className = "rewrite-status-item";
+    item.dataset.state = status.state;
+    item.classList.toggle("rewrite-status-item-active", isActiveStatus(status.state));
+
+    const topline = document.createElement("div");
+    topline.className = "rewrite-status-topline";
+
+    const host = document.createElement("span");
+    host.className = "rewrite-status-host";
+    host.textContent = status.host || shortUrl(status.url) || "Unknown site";
+
+    const state = document.createElement("span");
+    state.className = "rewrite-status-state";
+    state.textContent = status.message || status.state || "Idle";
+
+    topline.append(host, state);
+
+    const track = document.createElement("div");
+    track.className = "rewrite-status-mini-track";
+    const bar = document.createElement("div");
+    bar.className = "rewrite-status-mini-bar";
+    bar.style.width = `${status.progress}%`;
+    track.append(bar);
+
+    const meta = document.createElement("div");
+    meta.className = "rewrite-status-meta";
+    meta.textContent = statusDetail(status);
+
+    item.append(topline, track, meta);
+    rewriteStatusesList.append(item);
+  }
 }
 
 function statusMessage(status) {
@@ -319,6 +378,7 @@ function normalizeRewriteStatus(raw) {
   }
   const progress = Number.parseInt(raw.progress, 10);
   return {
+    id: typeof raw.id === "string" ? raw.id : "",
     state: typeof raw.state === "string" ? raw.state : DEFAULT_REWRITE_STATUS.state,
     progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0,
     message: typeof raw.message === "string" ? raw.message : "",
@@ -330,6 +390,26 @@ function normalizeRewriteStatus(raw) {
     startedAt: toNonNegativeInteger(raw.startedAt),
     updatedAt: toNonNegativeInteger(raw.updatedAt)
   };
+}
+
+function normalizeRewriteStatuses(raw) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map(normalizeRewriteStatus)
+    .filter((status) => status.updatedAt)
+    .sort(compareRewriteStatuses)
+    .slice(0, 8);
+}
+
+function compareRewriteStatuses(left, right) {
+  const leftActive = isActiveStatus(left.state);
+  const rightActive = isActiveStatus(right.state);
+  if (leftActive !== rightActive) {
+    return leftActive ? -1 : 1;
+  }
+  return right.updatedAt - left.updatedAt;
 }
 
 function normalizeBackend(backend) {
@@ -359,6 +439,15 @@ function toNonNegativeInteger(value) {
 
 function formatCount(value) {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function shortUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.pathname}`.slice(0, 80);
+  } catch (error) {
+    return String(url || "").slice(0, 80);
+  }
 }
 
 async function getCurrentTabHost() {

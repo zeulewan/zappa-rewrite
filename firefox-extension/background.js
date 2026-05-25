@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const DEFAULT_REWRITE_STATUS = {
+  id: "",
   state: "idle",
   progress: 0,
   message: "Idle",
@@ -23,6 +24,7 @@ const DEFAULT_REWRITE_STATUS = {
   startedAt: 0,
   updatedAt: 0
 };
+const MAX_REWRITE_STATUSES = 8;
 const DEV_SETTINGS_PATH = "dev-settings.json";
 const FORCED_DEV_SETTING_KEYS = [
   "configured",
@@ -321,6 +323,7 @@ Output rules:
 - "content" must be the complete rewritten Markdown body, not a diff or explanation.`;
 
 let settingsCache = { ...DEFAULT_SETTINGS };
+let rewriteStatusesCache = [];
 const requestContexts = new Map();
 
 class PassThroughResponse extends Error {}
@@ -402,6 +405,7 @@ browser.webRequest.onBeforeRequest.addListener(
       startedAt: Date.now()
     };
     updateRewriteStatus({
+      id: context.requestId,
       state: "capturing",
       progress: 15,
       message: "Capturing page",
@@ -430,6 +434,8 @@ browser.webRequest.onBeforeRequest.addListener(
 
     filter.onstop = async () => {
       let bodyBytes = new Uint8Array();
+      let streamedResponse = false;
+      let streamedContentChars = 0;
       try {
         bodyBytes = concatChunks(chunks);
         const charset = getCharsetFromHeaders(context.responseHeaders);
@@ -437,6 +443,7 @@ browser.webRequest.onBeforeRequest.addListener(
 
         if (!originalText.trim()) {
           await updateRewriteStatus({
+            id: context.requestId,
             state: "passed",
             progress: 100,
             message: "Passed through empty response",
@@ -451,6 +458,7 @@ browser.webRequest.onBeforeRequest.addListener(
         }
 
         await updateRewriteStatus({
+          id: context.requestId,
           state: "queued",
           progress: 30,
           message: "Preparing rewrite",
@@ -466,11 +474,35 @@ browser.webRequest.onBeforeRequest.addListener(
           assetKind: context.assetKind,
           contentType: getHeaderValue(context.responseHeaders, "content-type") || "",
           source: originalText,
-          startedAt: context.startedAt
+          requestId: context.requestId,
+          startedAt: context.startedAt,
+          onStreamHtml: (html) => {
+            streamedResponse = true;
+            streamedContentChars += html.length;
+            filter.write(new TextEncoder().encode(html));
+          }
         });
+
+        if (rewrittenText?.streamed) {
+          await updateRewriteStatus({
+            id: context.requestId,
+            state: "done",
+            progress: 100,
+            message: "Rewrite complete",
+            detail: `${formatCount(originalText.length)} chars -> ${formatCount(streamedContentChars)} streamed`,
+            url: context.url,
+            host: context.siteHost,
+            sourceChars: originalText.length,
+            contentChars: streamedContentChars,
+            startedAt: context.startedAt
+          });
+          filter.close();
+          return;
+        }
 
         const finalText = sanitizeRewrittenAsset(context.assetKind, rewrittenText);
         await updateRewriteStatus({
+          id: context.requestId,
           state: "done",
           progress: 100,
           message: "Rewrite complete",
@@ -487,6 +519,7 @@ browser.webRequest.onBeforeRequest.addListener(
         if (error instanceof PassThroughResponse) {
           console.warn("zappa pass-through", error.message);
           await updateRewriteStatus({
+            id: context.requestId,
             state: "passed",
             progress: 100,
             message: "Passed through",
@@ -500,6 +533,7 @@ browser.webRequest.onBeforeRequest.addListener(
           return;
         }
         await updateRewriteStatus({
+          id: context.requestId,
           state: "error",
           progress: 100,
           message: "Rewrite failed",
@@ -509,7 +543,11 @@ browser.webRequest.onBeforeRequest.addListener(
           startedAt: context.startedAt
         });
         const errorBody = buildErrorBody(context.assetKind, stringifyError(error));
-        filter.write(new TextEncoder().encode(errorBody));
+        if (streamedResponse) {
+          filter.write(new TextEncoder().encode(`<hr><p><strong>Rewrite failed:</strong> ${escapeHtml(stringifyError(error))}</p></main></body></html>`));
+        } else {
+          filter.write(new TextEncoder().encode(errorBody));
+        }
         filter.close();
       } finally {
         requestContexts.delete(details.requestId);
@@ -612,22 +650,51 @@ function toPositiveInteger(value, fallback) {
 }
 
 async function updateRewriteStatus(update) {
+  const normalized = normalizeRewriteStatus({
+    ...DEFAULT_REWRITE_STATUS,
+    ...update,
+    id: String(update.id || update.requestId || update.url || Date.now()),
+    updatedAt: Date.now()
+  });
+  rewriteStatusesCache = mergeRewriteStatus(rewriteStatusesCache, normalized);
   try {
     await browser.storage.local.set({
-      rewriteStatus: normalizeRewriteStatus({
-        ...DEFAULT_REWRITE_STATUS,
-        ...update,
-        updatedAt: Date.now()
-      })
+      rewriteStatus: normalized,
+      rewriteStatuses: rewriteStatusesCache
     });
   } catch (error) {
     console.warn("zappa status update failed", error);
   }
 }
 
+function mergeRewriteStatus(statuses, status) {
+  const merged = [
+    status,
+    ...statuses.filter((entry) => entry.id !== status.id)
+  ];
+  return merged
+    .map(normalizeRewriteStatus)
+    .sort(compareRewriteStatuses)
+    .slice(0, MAX_REWRITE_STATUSES);
+}
+
+function compareRewriteStatuses(left, right) {
+  const leftActive = isActiveRewriteState(left.state);
+  const rightActive = isActiveRewriteState(right.state);
+  if (leftActive !== rightActive) {
+    return leftActive ? -1 : 1;
+  }
+  return right.updatedAt - left.updatedAt;
+}
+
+function isActiveRewriteState(state) {
+  return state === "capturing" || state === "queued" || state === "rewriting";
+}
+
 function normalizeRewriteStatus(raw) {
   const progress = Number.parseInt(raw.progress, 10);
   return {
+    id: typeof raw.id === "string" ? raw.id : "",
     state: typeof raw.state === "string" ? raw.state : DEFAULT_REWRITE_STATUS.state,
     progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0,
     message: typeof raw.message === "string" ? raw.message : "",
@@ -798,7 +865,7 @@ function stringifyError(error) {
   return String(error);
 }
 
-async function rewriteAsset({ url, host, assetKind, contentType, source, startedAt }) {
+async function rewriteAsset({ url, host, assetKind, contentType, source, requestId, startedAt, onStreamHtml }) {
   const modelSource = prepareSourceForModel(assetKind, source, url);
   if (modelSource.length > settingsCache.maxInputChars) {
     throw new PassThroughResponse(
@@ -807,6 +874,7 @@ async function rewriteAsset({ url, host, assetKind, contentType, source, started
   }
 
   await updateRewriteStatus({
+    id: requestId,
     state: "rewriting",
     progress: 45,
     message: "Waiting for Pi",
@@ -818,7 +886,7 @@ async function rewriteAsset({ url, host, assetKind, contentType, source, started
     sourceChars: source.length,
     startedAt
   });
-  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source: modelSource });
+  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source: modelSource, onStreamHtml });
 }
 
 function prepareSourceForModel(assetKind, source, url = "") {
@@ -1217,7 +1285,7 @@ function compactText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
-async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source }) {
+async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source, onStreamHtml }) {
   const headers = {
     "Content-Type": "application/json"
   };
@@ -1229,16 +1297,35 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
     model: settingsCache.model,
     temperature: 0,
     max_tokens: settingsCache.maxOutputTokens,
+    stream: Boolean(onStreamHtml && assetKind === "html"),
     messages: buildMessages({ url, assetKind, contentType, source })
   };
 
-  const response = await fetchJson(`${trimTrailingSlash(settingsCache.baseUrl)}/chat/completions`, {
+  const response = await fetch(`${trimTrailingSlash(settingsCache.baseUrl)}/chat/completions`, {
     method: "POST",
     headers,
     body: JSON.stringify(payload)
   });
 
-  const content = response?.choices?.[0]?.message?.content;
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`backend HTTP ${response.status}: ${text}`);
+  }
+
+  const responseContentType = response.headers.get("content-type") || "";
+  if (payload.stream && response.body && responseContentType.includes("text/event-stream")) {
+    return streamChatCompletionToHtml(response, url, onStreamHtml);
+  }
+
+  const responseText = await response.text();
+  let parsedResponse;
+  try {
+    parsedResponse = JSON.parse(responseText);
+  } catch (error) {
+    throw new Error(`backend returned invalid JSON: ${responseText}`);
+  }
+
+  const content = parsedResponse?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("OpenAI-compatible backend did not return assistant content");
   }
@@ -1248,6 +1335,73 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
     throw new Error("OpenAI-compatible JSON output did not contain content");
   }
   return renderModelOutput(parsed, url);
+}
+
+async function streamChatCompletionToHtml(response, pageUrl, onStreamHtml) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const contentExtractor = createJsonContentExtractor((markdownDelta) => {
+    markdownStreamer.push(markdownDelta);
+  });
+  const markdownStreamer = createMarkdownHtmlStreamer((html) => {
+    if (!streamStarted) {
+      streamStarted = true;
+      onStreamHtml(buildReaderDocumentStart("Zappa Rewrite"));
+    }
+    onStreamHtml(sanitizeRenderedHtml(html, pageUrl));
+  });
+  let streamStarted = false;
+  let sseBuffer = "";
+  let rawModelText = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    sseBuffer += decoder.decode(value, { stream: true });
+    const events = sseBuffer.split("\n\n");
+    sseBuffer = events.pop() || "";
+    for (const eventText of events) {
+      const dataLines = eventText
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart());
+      if (!dataLines.length) {
+        continue;
+      }
+      const data = dataLines.join("\n");
+      if (data === "[DONE]") {
+        continue;
+      }
+      const parsed = JSON.parse(data);
+      if (parsed.error) {
+        throw new Error(parsed.error);
+      }
+      const delta = parsed.choices?.[0]?.delta?.content;
+      if (typeof delta === "string" && delta) {
+        rawModelText += delta;
+        contentExtractor.push(delta);
+      }
+    }
+  }
+  sseBuffer += decoder.decode();
+
+  const tail = contentExtractor.finish();
+  if (tail) {
+    markdownStreamer.push(tail);
+  }
+  const finalHtml = markdownStreamer.finish();
+  if (!streamStarted) {
+    streamStarted = true;
+    onStreamHtml(buildReaderDocumentStart("Zappa Rewrite"));
+  }
+  if (finalHtml) {
+    onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl));
+  }
+  onStreamHtml(buildReaderDocumentEnd());
+
+  return { streamed: true, content: rawModelText };
 }
 
 function renderModelOutput(parsed, pageUrl) {
@@ -1295,6 +1449,10 @@ function extractHtmlBody(html) {
 }
 
 function buildReaderDocument(title, bodyHtml) {
+  return buildReaderDocumentStart(title) + bodyHtml + buildReaderDocumentEnd();
+}
+
+function buildReaderDocumentStart(title) {
   const safeTitle = title ? escapeHtml(title) : "Zappa Rewrite";
   return (
     "<!doctype html>" +
@@ -1303,9 +1461,138 @@ function buildReaderDocument(title, bodyHtml) {
     `<title>${safeTitle}</title>` +
     `<style>${READER_CSS}</style>` +
     "</head><body>" +
-    `<main class="zappa-reader">${bodyHtml}</main>` +
-    "</body></html>"
+    "<main class=\"zappa-reader\">"
   );
+}
+
+function buildReaderDocumentEnd() {
+  return "</main></body></html>";
+}
+
+function createJsonContentExtractor(onContent) {
+  let mode = "search";
+  let searchBuffer = "";
+  let escapeMode = false;
+  let unicodeEscape = "";
+  let finished = false;
+  let fallback = "";
+  let emitted = false;
+
+  return {
+    push(chunk) {
+      fallback += chunk;
+      if (finished) {
+        return "";
+      }
+      let output = "";
+      for (const char of chunk) {
+        if (mode === "search") {
+          searchBuffer = (searchBuffer + char).slice(-40);
+          const match = /"content"\s*:\s*"$/.exec(searchBuffer);
+          if (match) {
+            mode = "string";
+            searchBuffer = "";
+          }
+          continue;
+        }
+
+        if (escapeMode) {
+          if (unicodeEscape || char === "u") {
+            if (!unicodeEscape && char === "u") {
+              unicodeEscape = "u";
+              continue;
+            }
+            unicodeEscape += char;
+            if (unicodeEscape.length === 5) {
+              const codePoint = Number.parseInt(unicodeEscape.slice(1), 16);
+              if (Number.isFinite(codePoint)) {
+                output += String.fromCharCode(codePoint);
+              }
+              unicodeEscape = "";
+              escapeMode = false;
+            }
+            continue;
+          }
+
+          output += decodeJsonEscape(char);
+          escapeMode = false;
+          continue;
+        }
+
+        if (char === "\\") {
+          escapeMode = true;
+          continue;
+        }
+        if (char === "\"") {
+          finished = true;
+          mode = "done";
+          continue;
+        }
+        output += char;
+      }
+      if (output) {
+        emitted = true;
+        onContent(output);
+      }
+      return output;
+    },
+    finish() {
+      if (finished || emitted) {
+        return "";
+      }
+      try {
+        const parsed = parseModelJson(fallback);
+        if (typeof parsed?.content === "string") {
+          return parsed.content;
+        }
+      } catch (error) {
+        return "";
+      }
+      return "";
+    }
+  };
+}
+
+function decodeJsonEscape(char) {
+  if (char === "n") {
+    return "\n";
+  }
+  if (char === "r") {
+    return "\r";
+  }
+  if (char === "t") {
+    return "\t";
+  }
+  if (char === "b") {
+    return "\b";
+  }
+  if (char === "f") {
+    return "\f";
+  }
+  return char;
+}
+
+function createMarkdownHtmlStreamer(onHtml) {
+  let buffer = "";
+
+  return {
+    push(markdownDelta) {
+      buffer += markdownDelta;
+      const blocks = buffer.split(/\n{2,}/);
+      buffer = blocks.pop() || "";
+      for (const block of blocks) {
+        const rendered = renderMarkdownToHtml(block.trim());
+        if (rendered) {
+          onHtml(rendered);
+        }
+      }
+    },
+    finish() {
+      const rendered = buffer.trim() ? renderMarkdownToHtml(buffer.trim()) : "";
+      buffer = "";
+      return rendered;
+    }
+  };
 }
 
 function renderMarkdownToHtml(markdown) {

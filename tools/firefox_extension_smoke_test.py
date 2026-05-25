@@ -119,6 +119,17 @@ Useful article text survives the reducer.
 - One useful bullet
 - Another useful bullet
 """
+        assistant_content = json.dumps(
+            {
+                "format": "markdown",
+                "title": "Rewritten smoke test",
+                "content": rewritten,
+            }
+        )
+
+        if payload.get("stream") is True:
+            self._write_sse_stream(payload.get("model", "mock"), assistant_content)
+            return
 
         self._write_json(
             200,
@@ -129,13 +140,7 @@ Useful article text survives the reducer.
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": json.dumps(
-                                {
-                                    "format": "markdown",
-                                    "title": "Rewritten smoke test",
-                                    "content": rewritten,
-                                }
-                            ),
+                            "content": assistant_content,
                         },
                         "finish_reason": "stop",
                     }
@@ -153,6 +158,28 @@ Useful article text survives the reducer.
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _write_sse_stream(self, model: str, content: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        for index in range(0, len(content), 24):
+            chunk = content[index:index + 24]
+            event = {
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": chunk},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
 
 
 @contextlib.contextmanager
@@ -291,6 +318,51 @@ def assert_reduced_source(source: str) -> None:
             raise RuntimeError(f"reduced source is missing {snippet!r}: {source[:1000]}")
 
 
+def assert_popup_multiple_statuses(driver: webdriver.Firefox, extension_uuid: str) -> None:
+    set_extension_storage(
+        driver,
+        extension_uuid,
+        {
+            "rewriteStatuses": [
+                {
+                    "id": "one",
+                    "state": "rewriting",
+                    "progress": 45,
+                    "message": "Waiting for Pi",
+                    "detail": "10 raw -> 8 reduced",
+                    "url": "https://one.example/",
+                    "host": "one.example",
+                    "sourceChars": 10,
+                    "contentChars": 0,
+                    "startedAt": 1000,
+                    "updatedAt": 2000,
+                },
+                {
+                    "id": "two",
+                    "state": "queued",
+                    "progress": 30,
+                    "message": "Preparing rewrite",
+                    "detail": "20 chars",
+                    "url": "https://two.example/",
+                    "host": "two.example",
+                    "sourceChars": 20,
+                    "contentChars": 0,
+                    "startedAt": 1000,
+                    "updatedAt": 1900,
+                },
+            ]
+        },
+    )
+    driver.get(f"moz-extension://{extension_uuid}/popup.html")
+    row_count = driver.execute_script("return document.querySelectorAll('#rewrite-statuses .rewrite-status-item').length")
+    message = driver.execute_script("return document.getElementById('rewrite-status-message')?.textContent || ''")
+    hosts = driver.execute_script(
+        "return Array.from(document.querySelectorAll('#rewrite-statuses .rewrite-status-host')).map(node => node.textContent)"
+    )
+    if row_count != 2 or message != "2 rewrites active" or hosts != ["one.example", "two.example"]:
+        raise RuntimeError(f"multiple status UI failed: rows={row_count!r} message={message!r} hosts={hosts!r}")
+
+
 def main() -> None:
     print("Starting mock backend and local test site...")
     with run_server(MockPiBridgeHandler, BACKEND_PORT), run_server(TestSiteHandler, SITE_PORT):
@@ -363,6 +435,14 @@ def main() -> None:
                 rewrite_status = get_extension_storage(driver, extension_uuid, "rewriteStatus")
                 if not isinstance(rewrite_status, dict) or rewrite_status.get("state") != "done":
                     raise RuntimeError(f"expected done rewrite status, got {rewrite_status!r}")
+                rewrite_statuses = get_extension_storage(driver, extension_uuid, "rewriteStatuses")
+                if (
+                    not isinstance(rewrite_statuses, list)
+                    or not rewrite_statuses
+                    or rewrite_statuses[0].get("state") != "done"
+                ):
+                    raise RuntimeError(f"expected rewriteStatuses list with done status, got {rewrite_statuses!r}")
+                assert_popup_multiple_statuses(driver, extension_uuid)
 
                 print("Verifying popup on/off switch...")
                 set_extension_enabled_from_popup(driver, extension_uuid, False)

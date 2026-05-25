@@ -234,6 +234,75 @@ button:hover {
   overflow-wrap: anywhere;
 }
 
+.rewrite-status-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rewrite-status-item {
+  padding: 8px 9px;
+  border: 1px solid #d8e4dc;
+  border-radius: 10px;
+  background: #f6faf7;
+}
+
+.rewrite-status-item-active {
+  border-color: #9fc5b5;
+  background: #eef7f2;
+}
+
+.rewrite-status-topline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.rewrite-status-host {
+  min-width: 0;
+  overflow: hidden;
+  color: #16211f;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rewrite-status-state {
+  flex: 0 0 auto;
+  color: #1b6b53;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rewrite-status-item[data-state="error"] .rewrite-status-state {
+  color: #7d2b2b;
+}
+
+.rewrite-status-mini-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #d8e4dc;
+}
+
+.rewrite-status-mini-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: #1b6b53;
+}
+
+.rewrite-status-meta {
+  margin-top: 4px;
+  color: #546762;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .status {
   min-height: 18px;
   margin: 4px 2px 0;
