@@ -2530,6 +2530,7 @@ function sanitizeRenderedHtml(html, pageUrl) {
     return sanitizeRewrittenAsset("html", html);
   }
 
+  html = rescueEscapedSafeHtmlBlocks(html);
   const parser = new DOMParser();
   const doc = parser.parseFromString(`<body>${html}</body>`, "text/html");
   for (const node of Array.from(doc.body.querySelectorAll("*"))) {
@@ -2599,6 +2600,16 @@ function sanitizeRenderedHtml(html, pageUrl) {
   }
 
   return doc.body.innerHTML;
+}
+
+function rescueEscapedSafeHtmlBlocks(html) {
+  return String(html || "")
+    .replace(/&lt;(figure|table|form|details)\b[\s\S]*?&lt;\/\1&gt;/gi, (match) => {
+      return unescapeHtmlEntities(match);
+    })
+    .replace(/&lt;img\b[\s\S]*?\/?&gt;/gi, (match) => {
+      return unescapeHtmlEntities(match);
+    });
 }
 
 function inferTitleFromRenderedHtml(html) {

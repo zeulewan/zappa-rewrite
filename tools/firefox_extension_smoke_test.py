@@ -124,6 +124,8 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
     <figure><img src="http://127.0.0.1:18080/images/fenced-safe.jpg" alt="Fenced safe image" width="465" /></figure>
 ```
 
+Inline safe media: <figure><img src="http://127.0.0.1:18080/images/inline-safe.jpg" alt="Inline safe image" width="465" loading="eager"/><figcaption>Inline figure caption.</figcaption></figure>
+
 Useful article text survives the reducer.
 
 - One useful bullet
@@ -479,6 +481,24 @@ def main() -> None:
                     "alt": "Fenced safe image",
                 }:
                     raise RuntimeError(f"fenced safe HTML rendered as text: {fenced_image!r}")
+                inline_image = driver.execute_script(
+                    """
+                    const image = document.querySelector('main.zappa-reader img[alt="Inline safe image"]');
+                    return image ? {
+                      src: image.getAttribute('src'),
+                      width: image.getAttribute('width'),
+                      alt: image.getAttribute('alt'),
+                      loading: image.getAttribute('loading')
+                    } : null;
+                    """
+                )
+                if inline_image != {
+                    "src": "http://127.0.0.1:18080/images/inline-safe.jpg",
+                    "width": "465",
+                    "alt": "Inline safe image",
+                    "loading": "eager",
+                }:
+                    raise RuntimeError(f"inline safe HTML rendered as text: {inline_image!r}")
                 assert_reduced_source(MockPiBridgeHandler.last_source)
                 rewrite_status = get_extension_storage(driver, extension_uuid, "rewriteStatus")
                 if not isinstance(rewrite_status, dict) or rewrite_status.get("state") != "done":
