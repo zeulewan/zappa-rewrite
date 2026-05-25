@@ -129,47 +129,68 @@ def run_pi_rewrite(
     messages: list[dict[str, Any]],
 ) -> str:
     prompt = build_pi_prompt(messages)
-    command = [
-        pi_bin,
-        "--mode",
-        "json",
-        "--print",
-        "--no-session",
-        "--no-tools",
-        "--no-extensions",
-        "--no-skills",
-        "--no-context-files",
-        "--provider",
-        provider,
-        "--model",
-        model,
-        "--thinking",
-        thinking,
-        "--system-prompt",
-        BRIDGE_SYSTEM_PROMPT,
-        prompt,
-    ]
-    env = os.environ.copy()
-    env.setdefault("PI_TELEMETRY", "0")
+    prompt_path = write_prompt_file(prompt, cwd)
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(cwd),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise PiBridgeError(f"pi timed out after {timeout_seconds}s") from exc
+        command = [
+            pi_bin,
+            "--mode",
+            "json",
+            "--print",
+            "--no-session",
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-context-files",
+            "--provider",
+            provider,
+            "--model",
+            model,
+            "--thinking",
+            thinking,
+            "--system-prompt",
+            BRIDGE_SYSTEM_PROMPT,
+            f"@{prompt_path}",
+        ]
+        env = os.environ.copy()
+        env.setdefault("PI_TELEMETRY", "0")
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(cwd),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise PiBridgeError(f"pi timed out after {timeout_seconds}s") from exc
 
-    if completed.returncode != 0:
-        stderr = completed.stderr.strip() or completed.stdout.strip()
-        raise PiBridgeError(f"pi exited with {completed.returncode}: {stderr[-2000:]}")
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip() or completed.stdout.strip()
+            raise PiBridgeError(f"pi exited with {completed.returncode}: {stderr[-2000:]}")
 
-    assistant_text = extract_pi_text(completed.stdout)
-    return normalize_model_output(assistant_text)
+        assistant_text = extract_pi_text(completed.stdout)
+        return normalize_model_output(assistant_text)
+    finally:
+        try:
+            prompt_path.unlink()
+        except OSError:
+            pass
+
+
+def write_prompt_file(prompt: str, cwd: Path) -> Path:
+    cwd.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        prefix="zappa-pi-prompt-",
+        suffix=".txt",
+        dir=str(cwd),
+        delete=False,
+    ) as prompt_file:
+        prompt_file.write(prompt)
+        return Path(prompt_file.name)
 
 
 def extract_pi_text(stdout: str) -> str:
