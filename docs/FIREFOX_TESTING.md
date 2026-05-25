@@ -10,7 +10,7 @@ Verified:
 - the extension installs as a temporary add-on
 - the extension can rewrite a test page
 - the extension honors the global enable toggle
-- the extension honors the per-site disabled-host list
+- the extension only rewrites allowlisted sites
 
 ## Why the automated test uses a mock backend
 
@@ -46,9 +46,10 @@ It does the following:
 5. installs the add-on temporarily
 6. reads Firefox's extension UUID mapping
 7. verifies:
+   - fresh-install pass-through behavior
    - rewrite-on behavior
    - global disable behavior
-   - per-site disable behavior
+   - per-site allowlist behavior
 
 ## Running the smoke test
 

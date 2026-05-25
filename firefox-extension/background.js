@@ -1,5 +1,7 @@
 const DEFAULT_SETTINGS = {
   enabled: true,
+  configured: false,
+  allowedHosts: [],
   disabledHosts: [],
   backend: "pi_codex",
   baseUrl: "http://127.0.0.1:19777",
@@ -9,6 +11,17 @@ const DEFAULT_SETTINGS = {
   maxOutputTokens: 8192
 };
 
+const DEV_SETTINGS_PATH = "dev-settings.json";
+const FORCED_DEV_SETTING_KEYS = [
+  "enabled",
+  "configured",
+  "backend",
+  "baseUrl",
+  "model",
+  "apiKey",
+  "maxInputChars",
+  "maxOutputTokens"
+];
 const REQUEST_TYPES = ["main_frame", "sub_frame"];
 const CONTENT_TYPE_BY_KIND = {
   html: "text/html; charset=utf-8"
@@ -29,6 +42,8 @@ Output rules:
 
 let settingsCache = { ...DEFAULT_SETTINGS };
 const requestContexts = new Map();
+
+class PassThroughResponse extends Error {}
 
 initializeSettings().catch((error) => {
   console.error("zappa init failed", error);
@@ -124,8 +139,9 @@ browser.webRequest.onBeforeRequest.addListener(
     };
 
     filter.onstop = async () => {
+      let bodyBytes = new Uint8Array();
       try {
-        const bodyBytes = concatChunks(chunks);
+        bodyBytes = concatChunks(chunks);
         const charset = getCharsetFromHeaders(context.responseHeaders);
         const originalText = decodeBytes(bodyBytes, charset);
 
@@ -146,6 +162,12 @@ browser.webRequest.onBeforeRequest.addListener(
         filter.write(new TextEncoder().encode(finalText));
         filter.close();
       } catch (error) {
+        if (error instanceof PassThroughResponse) {
+          console.warn("zappa pass-through", error.message);
+          filter.write(bodyBytes);
+          filter.close();
+          return;
+        }
         const errorBody = buildErrorBody(context.assetKind, stringifyError(error));
         filter.write(new TextEncoder().encode(errorBody));
         filter.close();
@@ -168,18 +190,57 @@ browser.webRequest.onErrorOccurred.addListener(
 );
 
 async function initializeSettings() {
+  const devSettings = await loadDevSettings();
+  const defaults = normalizeSettings({ ...DEFAULT_SETTINGS, ...devSettings });
+  Object.assign(DEFAULT_SETTINGS, defaults);
   const stored = await browser.storage.local.get(DEFAULT_SETTINGS);
-  settingsCache = normalizeSettings(stored);
+  settingsCache = normalizeSettings(applyForcedDevSettings(stored, devSettings));
   await browser.storage.local.set(settingsCache);
+}
+
+async function loadDevSettings() {
+  try {
+    const response = await fetch(browser.runtime.getURL(DEV_SETTINGS_PATH), { cache: "no-store" });
+    if (response.status === 404) {
+      return {};
+    }
+    if (!response.ok) {
+      console.warn(`zappa dev settings HTTP ${response.status}`);
+      return {};
+    }
+    const parsed = await response.json();
+    return isPlainObject(parsed) ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function applyForcedDevSettings(stored, devSettings) {
+  if (!isPlainObject(devSettings) || devSettings.force !== true) {
+    return stored;
+  }
+
+  const merged = { ...stored };
+  for (const key of FORCED_DEV_SETTING_KEYS) {
+    if (Object.hasOwn(devSettings, key)) {
+      merged[key] = devSettings[key];
+    }
+  }
+  return merged;
 }
 
 function normalizeSettings(raw) {
   const disabledHosts = Array.isArray(raw.disabledHosts)
     ? Array.from(new Set(raw.disabledHosts.map(normalizeHost).filter(Boolean))).sort()
     : [];
+  const allowedHosts = Array.isArray(raw.allowedHosts)
+    ? Array.from(new Set(raw.allowedHosts.map(normalizeHost).filter(Boolean))).sort()
+    : [];
 
   return {
     enabled: Boolean(raw.enabled),
+    configured: Boolean(raw.configured),
+    allowedHosts,
     disabledHosts,
     backend: normalizeBackend(raw.backend),
     baseUrl: typeof raw.baseUrl === "string" && raw.baseUrl.trim()
@@ -192,6 +253,10 @@ function normalizeSettings(raw) {
     maxInputChars: toPositiveInteger(raw.maxInputChars, DEFAULT_SETTINGS.maxInputChars),
     maxOutputTokens: toPositiveInteger(raw.maxOutputTokens, DEFAULT_SETTINGS.maxOutputTokens)
   };
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeBackend(backend) {
@@ -210,6 +275,9 @@ function shouldRewriteRequest(details) {
   if (!settingsCache.enabled) {
     return false;
   }
+  if (!settingsCache.configured) {
+    return false;
+  }
   if (!REQUEST_TYPES.includes(details.type)) {
     return false;
   }
@@ -217,7 +285,7 @@ function shouldRewriteRequest(details) {
     return false;
   }
   const siteHost = getSiteHostFromDetails(details);
-  if (siteHost && settingsCache.disabledHosts.includes(siteHost)) {
+  if (!siteHost || !settingsCache.allowedHosts.includes(siteHost)) {
     return false;
   }
   return Boolean(assetKindFromRequestType(details.type));
@@ -357,7 +425,7 @@ function stringifyError(error) {
 
 async function rewriteAsset({ url, assetKind, contentType, source }) {
   if (source.length > settingsCache.maxInputChars) {
-    throw new Error(`asset too large (${source.length} > ${settingsCache.maxInputChars})`);
+    throw new PassThroughResponse(`asset too large (${source.length} > ${settingsCache.maxInputChars})`);
   }
 
   return rewriteWithOpenAICompatible({ url, assetKind, contentType, source });

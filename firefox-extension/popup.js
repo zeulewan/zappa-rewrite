@@ -1,5 +1,7 @@
 const DEFAULT_SETTINGS = {
   enabled: true,
+  configured: false,
+  allowedHosts: [],
   disabledHosts: [],
   backend: "pi_codex",
   baseUrl: "http://127.0.0.1:19777",
@@ -9,7 +11,17 @@ const DEFAULT_SETTINGS = {
   maxOutputTokens: 8192
 };
 
-const enabledInput = document.getElementById("enabled");
+const DEV_SETTINGS_PATH = "dev-settings.json";
+const FORCED_DEV_SETTING_KEYS = [
+  "enabled",
+  "configured",
+  "backend",
+  "baseUrl",
+  "model",
+  "apiKey",
+  "maxInputChars",
+  "maxOutputTokens"
+];
 const currentSiteLabel = document.getElementById("current-site");
 const toggleSiteButton = document.getElementById("toggle-site");
 const settingsForm = document.getElementById("settings-form");
@@ -19,7 +31,7 @@ const modelInput = document.getElementById("model");
 const apiKeyInput = document.getElementById("api-key");
 const maxInputCharsInput = document.getElementById("max-input-chars");
 const maxOutputTokensInput = document.getElementById("max-output-tokens");
-const disabledSitesList = document.getElementById("disabled-sites");
+const allowedSitesList = document.getElementById("allowed-sites");
 const statusLabel = document.getElementById("status");
 
 let settings = { ...DEFAULT_SETTINGS };
@@ -29,28 +41,22 @@ initialize().catch((error) => {
   showStatus(`Failed to load popup: ${error.message}`, true);
 });
 
-enabledInput.addEventListener("change", async () => {
-  settings.enabled = enabledInput.checked;
-  await browser.storage.local.set({ enabled: settings.enabled });
-  showStatus(settings.enabled ? "Rewriting enabled." : "Rewriting disabled.");
-});
-
 toggleSiteButton.addEventListener("click", async () => {
   if (!currentHost) {
     return;
   }
 
-  const disabledHosts = new Set(settings.disabledHosts);
-  if (disabledHosts.has(currentHost)) {
-    disabledHosts.delete(currentHost);
-    showStatus(`Enabled rewriting for ${currentHost}.`);
-  } else {
-    disabledHosts.add(currentHost);
+  const allowedHosts = new Set(settings.allowedHosts);
+  if (allowedHosts.has(currentHost)) {
+    allowedHosts.delete(currentHost);
     showStatus(`Disabled rewriting on ${currentHost}.`);
+  } else {
+    allowedHosts.add(currentHost);
+    showStatus(`Enabled rewriting for ${currentHost}.`);
   }
 
-  settings.disabledHosts = Array.from(disabledHosts).sort();
-  await browser.storage.local.set({ disabledHosts: settings.disabledHosts });
+  settings.allowedHosts = Array.from(allowedHosts).sort();
+  await browser.storage.local.set({ allowedHosts: settings.allowedHosts });
   render();
 });
 
@@ -58,6 +64,7 @@ settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   settings.backend = normalizeBackend(backendInput.value);
+  settings.configured = true;
   settings.baseUrl = baseUrlInput.value.trim() || DEFAULT_SETTINGS.baseUrl;
   settings.model = modelInput.value.trim() || DEFAULT_SETTINGS.model;
   settings.apiKey = apiKeyInput.value;
@@ -66,6 +73,7 @@ settingsForm.addEventListener("submit", async (event) => {
 
   await browser.storage.local.set({
     backend: settings.backend,
+    configured: true,
     baseUrl: settings.baseUrl,
     model: settings.model,
     apiKey: settings.apiKey,
@@ -77,13 +85,46 @@ settingsForm.addEventListener("submit", async (event) => {
 });
 
 async function initialize() {
-  settings = normalizeSettings(await browser.storage.local.get(DEFAULT_SETTINGS));
+  const devSettings = await loadDevSettings();
+  const defaults = normalizeSettings({ ...DEFAULT_SETTINGS, ...devSettings });
+  Object.assign(DEFAULT_SETTINGS, defaults);
+  const stored = await browser.storage.local.get(DEFAULT_SETTINGS);
+  settings = normalizeSettings(applyForcedDevSettings(stored, devSettings));
   currentHost = await getCurrentTabHost();
   render();
 }
 
+async function loadDevSettings() {
+  try {
+    const response = await fetch(browser.runtime.getURL(DEV_SETTINGS_PATH), { cache: "no-store" });
+    if (response.status === 404) {
+      return {};
+    }
+    if (!response.ok) {
+      return {};
+    }
+    const parsed = await response.json();
+    return isPlainObject(parsed) ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function applyForcedDevSettings(stored, devSettings) {
+  if (!isPlainObject(devSettings) || devSettings.force !== true) {
+    return stored;
+  }
+
+  const merged = { ...stored };
+  for (const key of FORCED_DEV_SETTING_KEYS) {
+    if (Object.hasOwn(devSettings, key)) {
+      merged[key] = devSettings[key];
+    }
+  }
+  return merged;
+}
+
 function render() {
-  enabledInput.checked = settings.enabled;
   backendInput.value = settings.backend;
   baseUrlInput.value = settings.baseUrl;
   modelInput.value = settings.model;
@@ -94,25 +135,25 @@ function render() {
   if (currentHost) {
     currentSiteLabel.textContent = currentHost;
     toggleSiteButton.disabled = false;
-    toggleSiteButton.textContent = settings.disabledHosts.includes(currentHost)
-      ? "Enable on this website"
-      : "Disable on this website";
+    toggleSiteButton.textContent = settings.allowedHosts.includes(currentHost)
+      ? "Disable on this website"
+      : "Enable on this website";
   } else {
     currentSiteLabel.textContent = "No normal website is active in this tab.";
     toggleSiteButton.disabled = true;
-    toggleSiteButton.textContent = "Disable on this website";
+    toggleSiteButton.textContent = "Enable on this website";
   }
 
-  disabledSitesList.textContent = "";
-  if (!settings.disabledHosts.length) {
+  allowedSitesList.textContent = "";
+  if (!settings.allowedHosts.length) {
     const empty = document.createElement("li");
     empty.className = "muted";
-    empty.textContent = "No disabled sites yet.";
-    disabledSitesList.append(empty);
+    empty.textContent = "No enabled sites yet.";
+    allowedSitesList.append(empty);
     return;
   }
 
-  for (const host of settings.disabledHosts) {
+  for (const host of settings.allowedHosts) {
     const item = document.createElement("li");
     item.className = "site-row";
 
@@ -123,24 +164,28 @@ function render() {
     removeButton.type = "button";
     removeButton.textContent = "Remove";
     removeButton.addEventListener("click", async () => {
-      settings.disabledHosts = settings.disabledHosts.filter((entry) => entry !== host);
-      await browser.storage.local.set({ disabledHosts: settings.disabledHosts });
+      settings.allowedHosts = settings.allowedHosts.filter((entry) => entry !== host);
+      await browser.storage.local.set({ allowedHosts: settings.allowedHosts });
       if (host === currentHost) {
-        showStatus(`Enabled rewriting for ${host}.`);
+        showStatus(`Disabled rewriting on ${host}.`);
       } else {
-        showStatus(`Removed ${host} from disabled sites.`);
+        showStatus(`Removed ${host} from enabled sites.`);
       }
       render();
     });
 
     item.append(label, removeButton);
-    disabledSitesList.append(item);
+    allowedSitesList.append(item);
   }
 }
 
 function normalizeSettings(raw) {
   return {
     enabled: Boolean(raw.enabled),
+    configured: Boolean(raw.configured),
+    allowedHosts: Array.isArray(raw.allowedHosts)
+      ? Array.from(new Set(raw.allowedHosts.map(normalizeHost).filter(Boolean))).sort()
+      : [],
     disabledHosts: Array.isArray(raw.disabledHosts)
       ? Array.from(new Set(raw.disabledHosts.map(normalizeHost).filter(Boolean))).sort()
       : [],
@@ -166,6 +211,10 @@ function normalizeBackend(backend) {
 
 function normalizeHost(host) {
   return typeof host === "string" ? host.trim().toLowerCase() : "";
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function toPositiveInteger(value, fallback) {

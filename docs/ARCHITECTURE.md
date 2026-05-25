@@ -31,7 +31,7 @@ The Firefox extension is the main product direction. The proxy code remains as a
 ### Request flow
 
 1. Firefox issues a request for a page or frame.
-2. `onBeforeSendHeaders` forces `Accept-Encoding: identity` for candidate requests.
+2. If the extension is configured and the site host is allowlisted, `onBeforeSendHeaders` forces `Accept-Encoding: identity`.
 3. `onBeforeRequest` creates a `filterResponseData` stream filter for eligible requests.
 4. The filter buffers the full response body.
 5. On stream stop, the extension decodes the response body.
@@ -64,6 +64,8 @@ The extension stores settings in `browser.storage.local`.
 Current fields:
 
 - `enabled`
+- `configured`
+- `allowedHosts`
 - `disabledHosts`
 - `backend`
 - `baseUrl`
@@ -78,9 +80,11 @@ Current fields:
 
 The browser-side path is intentionally HTML-only. The prompt forbids scripts, and `background.js` strips script tags, inline event handlers, `javascript:` URLs, and stale integrity attributes from rewritten HTML before writing the response.
 
-### Per-site disable behavior
+### Per-site allow behavior
 
-The disabled-sites list is host-based, not full-URL-based.
+Rewriting is off for every site by default. A host must be added to `allowedHosts` before any page from that site can be rewritten.
+
+The enabled-sites list is host-based, not full-URL-based.
 
 The extension derives the site host from:
 
@@ -88,7 +92,7 @@ The extension derives the site host from:
 - `originUrl`, if present
 - otherwise the request URL itself
 
-This means a disabled host prevents rewriting of subresources that are considered part of that top-level site context.
+This means an allowed host permits rewriting of pages and frames that are considered part of that top-level site context.
 
 ### Rewrite output contract
 

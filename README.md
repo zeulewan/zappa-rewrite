@@ -35,6 +35,8 @@ Use these extension settings:
 - Base URL: `http://127.0.0.1:19777`
 - Model: `gpt-5.4-mini`
 
+For temporary add-on development, an ignored `firefox-extension/dev-settings.json` can prefill local bridge settings.
+
 For a Tailscale-visible bridge on the workstation:
 
 ```bash

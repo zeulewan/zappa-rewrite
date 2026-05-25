@@ -13,16 +13,12 @@
           <h1>Zappa Rewrite</h1>
           <p>Local-first Firefox page rewriting.</p>
         </div>
-        <label class="toggle-row">
-          <span>Enabled</span>
-          <input id="enabled" type="checkbox">
-        </label>
       </header>
 
       <section class="card">
         <h2>This Website</h2>
         <p id="current-site" class="muted">Looking up current tab...</p>
-        <button id="toggle-site" type="button">Disable on this website</button>
+        <button id="toggle-site" type="button">Enable on this website</button>
       </section>
 
       <section class="card">
@@ -68,9 +64,9 @@
       </section>
 
       <section class="card">
-        <h2>Disabled Sites</h2>
-        <p class="muted">Requests from these top-level sites will bypass rewriting.</p>
-        <ul id="disabled-sites" class="site-list"></ul>
+        <h2>Enabled Sites</h2>
+        <p class="muted">Only these top-level sites can be rewritten.</p>
+        <ul id="allowed-sites" class="site-list"></ul>
       </section>
 
       <p id="status" class="status" aria-live="polite"></p>

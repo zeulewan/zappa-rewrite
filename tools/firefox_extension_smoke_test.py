@@ -19,7 +19,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION_DIR = ROOT / "firefox-extension"
 SITE_PORT = 18080
-BACKEND_PORT = 19777
+BACKEND_PORT = 19778
 SITE_URL = f"http://127.0.0.1:{SITE_PORT}/"
 ADDON_ID = "zappa-rewrite@nova.local"
 FIREFOX_BINARY_CANDIDATES = [
@@ -131,6 +131,8 @@ def build_xpi(target_dir: Path) -> Path:
     with zipfile.ZipFile(xpi_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in EXTENSION_DIR.rglob("*"):
             if path.is_file():
+                if path.name == "dev-settings.json":
+                    continue
                 archive.write(path, path.relative_to(EXTENSION_DIR))
     return xpi_path
 
@@ -207,10 +209,24 @@ def main() -> None:
                 extension_uuid = read_extension_uuid(driver)
                 print(f"Extension UUID: {extension_uuid}")
 
-                print("Verifying rewrite is active...")
+                print("Verifying fresh install passes through by default...")
+                marker = load_site_and_read_marker(driver)
+                if marker != "ORIGINAL PAGE":
+                    raise RuntimeError(f"expected original marker before allowlist, got {marker!r}")
+
+                print("Verifying allowlisted site rewrites...")
+                set_extension_storage(
+                    driver,
+                    extension_uuid,
+                    {
+                        "configured": True,
+                        "allowedHosts": ["127.0.0.1"],
+                        "baseUrl": f"http://127.0.0.1:{BACKEND_PORT}",
+                    },
+                )
                 marker = load_site_and_read_marker(driver)
                 if marker != "REWRITTEN PAGE":
-                    raise RuntimeError(f"expected rewritten marker, got {marker!r}")
+                    raise RuntimeError(f"expected rewritten marker after allowlist, got {marker!r}")
 
                 print("Verifying global disable...")
                 set_extension_storage(driver, extension_uuid, {"enabled": False})
@@ -218,15 +234,15 @@ def main() -> None:
                 if marker != "ORIGINAL PAGE":
                     raise RuntimeError(f"expected original marker after global disable, got {marker!r}")
 
-                print("Verifying per-site disable list...")
+                print("Verifying allowlist removal...")
                 set_extension_storage(
                     driver,
                     extension_uuid,
-                    {"enabled": True, "disabledHosts": ["127.0.0.1"]},
+                    {"enabled": True, "allowedHosts": []},
                 )
                 marker = load_site_and_read_marker(driver)
                 if marker != "ORIGINAL PAGE":
-                    raise RuntimeError(f"expected original marker after site disable, got {marker!r}")
+                    raise RuntimeError(f"expected original marker after allowlist removal, got {marker!r}")
 
                 print("Smoke test passed.")
             finally:
