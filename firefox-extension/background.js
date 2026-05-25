@@ -1797,13 +1797,12 @@ function renderMarkdownToHtml(markdown) {
     }
 
     if (isRawMarkdownHtmlBlock(trimmed)) {
-      const rawLines = [line];
-      index += 1;
+      const rawLines = [];
       while (index < lines.length && lines[index].trim()) {
         rawLines.push(lines[index]);
         index += 1;
       }
-      html.push(rawLines.join("\n"));
+      html.push(normalizeRawMarkdownHtmlBlock(rawLines.join("\n")));
       continue;
     }
 
@@ -1898,8 +1897,29 @@ function isMarkdownBlockStart(lines, index) {
 }
 
 function isRawMarkdownHtmlBlock(trimmed) {
-  const match = /^<\/?([a-z][a-z0-9-]*)\b/i.exec(trimmed);
-  return Boolean(match && MARKDOWN_RAW_HTML_BLOCK_TAGS.has(match[1].toLowerCase()));
+  return Boolean(rawMarkdownHtmlBlockTag(trimmed));
+}
+
+function rawMarkdownHtmlBlockTag(trimmed) {
+  const literalMatch = /^<\/?([a-z][a-z0-9-]*)\b/i.exec(trimmed);
+  if (literalMatch && MARKDOWN_RAW_HTML_BLOCK_TAGS.has(literalMatch[1].toLowerCase())) {
+    return literalMatch[1].toLowerCase();
+  }
+
+  const escapedMatch = /^&lt;\/?([a-z][a-z0-9-]*)(?:\s|&gt;|\/?&gt;)/i.exec(trimmed);
+  if (escapedMatch && MARKDOWN_RAW_HTML_BLOCK_TAGS.has(escapedMatch[1].toLowerCase())) {
+    return escapedMatch[1].toLowerCase();
+  }
+
+  return "";
+}
+
+function normalizeRawMarkdownHtmlBlock(rawHtml) {
+  const trimmed = rawHtml.trim();
+  if (/^&lt;\/?[a-z][a-z0-9-]*(?:\s|&gt;|\/?&gt;)/i.test(trimmed)) {
+    return unescapeHtmlEntities(trimmed);
+  }
+  return rawHtml;
 }
 
 function isMarkdownTableStart(lines, index) {

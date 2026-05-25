@@ -110,10 +110,7 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
         type(self).last_source = source
         rewritten = """# REWRITTEN PAGE
 
-<figure>
-  <img src="http://127.0.0.1:18080/images/hero-large.jpg" width="960" height="540" alt="A useful hero image">
-  <figcaption>Useful image caption.</figcaption>
-</figure>
+&lt;figure&gt;&lt;img src=&quot;http://127.0.0.1:18080/images/hero-large.jpg&quot; width=&quot;960&quot; height=&quot;540&quot; alt=&quot;A useful hero image&quot; /&gt;&lt;figcaption&gt;Useful image caption.&lt;/figcaption&gt;&lt;/figure&gt;
 
 Useful article text survives the reducer.
 
