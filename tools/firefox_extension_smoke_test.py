@@ -112,6 +112,10 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
 
 &lt;figure&gt;&lt;img src=&quot;http://127.0.0.1:18080/images/hero-large.jpg&quot; width=&quot;960&quot; height=&quot;540&quot; alt=&quot;A useful hero image&quot; /&gt;&lt;figcaption&gt;Useful image caption.&lt;/figcaption&gt;&lt;/figure&gt;
 
+```html
+    <figure><img src="http://127.0.0.1:18080/images/fenced-safe.jpg" alt="Fenced safe image" width="465" /></figure>
+```
+
 Useful article text survives the reducer.
 
 - One useful bullet
@@ -440,6 +444,22 @@ def main() -> None:
                     "decoding": "async",
                 }:
                     raise RuntimeError(f"rendered image lost sizing metadata: {rendered_image!r}")
+                fenced_image = driver.execute_script(
+                    """
+                    const image = document.querySelector('main.zappa-reader img[alt="Fenced safe image"]');
+                    return image ? {
+                      src: image.getAttribute('src'),
+                      width: image.getAttribute('width'),
+                      alt: image.getAttribute('alt')
+                    } : null;
+                    """
+                )
+                if fenced_image != {
+                    "src": "http://127.0.0.1:18080/images/fenced-safe.jpg",
+                    "width": "465",
+                    "alt": "Fenced safe image",
+                }:
+                    raise RuntimeError(f"fenced safe HTML rendered as text: {fenced_image!r}")
                 assert_reduced_source(MockPiBridgeHandler.last_source)
                 rewrite_status = get_extension_storage(driver, extension_uuid, "rewriteStatus")
                 if not isinstance(rewrite_status, dict) or rewrite_status.get("state") != "done":

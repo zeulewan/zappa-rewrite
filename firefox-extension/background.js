@@ -1786,13 +1786,20 @@ function renderMarkdownToHtml(markdown) {
     const fenceMatch = /^```([a-z0-9_-]+)?\s*$/i.exec(trimmed);
     if (fenceMatch) {
       const codeLines = [];
+      const fenceLanguage = (fenceMatch[1] || "").toLowerCase();
       index += 1;
       while (index < lines.length && !/^```\s*$/.test(lines[index].trim())) {
         codeLines.push(lines[index]);
         index += 1;
       }
       index += index < lines.length ? 1 : 0;
-      html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+      const codeText = codeLines.join("\n");
+      const trimmedCodeText = codeText.trim();
+      if ((fenceLanguage === "html" || fenceLanguage === "htm") && isRawMarkdownHtmlBlock(trimmedCodeText)) {
+        html.push(normalizeRawMarkdownHtmlBlock(trimmedCodeText));
+      } else {
+        html.push(`<pre><code>${escapeHtml(codeText)}</code></pre>`);
+      }
       continue;
     }
 
