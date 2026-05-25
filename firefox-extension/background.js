@@ -366,6 +366,15 @@ browser.runtime.onMessage.addListener((message, sender) => {
     return undefined;
   }
 
+  if (message.type === "zappa-refresh-settings") {
+    return initializeSettings()
+      .then(() => ({ ok: true }))
+      .catch((error) => {
+        console.error("zappa settings refresh failed", error);
+        return { ok: false, error: stringifyError(error) };
+      });
+  }
+
   return undefined;
 });
 

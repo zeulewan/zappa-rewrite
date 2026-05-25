@@ -72,6 +72,8 @@ let rewriteStatus = { ...DEFAULT_REWRITE_STATUS };
 let rewriteStatuses = [];
 let currentHost = "";
 let currentTabId = null;
+let currentTabIsReader = false;
+let currentOriginalUrl = "";
 
 initialize().catch((error) => {
   showStatus(`Failed to load popup: ${error.message}`, true);
@@ -108,9 +110,10 @@ browser.storage.onChanged.addListener((changes, areaName) => {
 extensionEnabledInput.addEventListener("change", async () => {
   settings.enabled = extensionEnabledInput.checked;
   await browser.storage.local.set({ enabled: settings.enabled });
+  await refreshBackgroundSettings();
   if (currentHost && settings.allowedHosts.includes(currentHost)) {
-    await reloadCurrentTab();
-    showStatus(settings.enabled ? "Zappa is on. Reloading this tab." : "Zappa is off. Reloading this tab.");
+    await reloadCurrentTab({ restoreOriginal: !settings.enabled });
+    showStatus(settings.enabled ? "Zappa is on. Reloading this tab." : "Zappa is off. Opening the normal site.");
   } else {
     showStatus(settings.enabled ? "Zappa is on." : "Zappa is off.");
   }
@@ -133,7 +136,8 @@ toggleSiteButton.addEventListener("click", async () => {
 
   settings.allowedHosts = Array.from(allowedHosts).sort();
   await browser.storage.local.set({ allowedHosts: settings.allowedHosts });
-  await reloadCurrentTab();
+  await refreshBackgroundSettings();
+  await reloadCurrentTab({ restoreOriginal: !allowedHosts.has(currentHost) });
   render();
 });
 
@@ -250,9 +254,12 @@ function render() {
     removeButton.type = "button";
     removeButton.textContent = "Remove";
     removeButton.addEventListener("click", async () => {
+      const removedCurrentHost = host === currentHost;
       settings.allowedHosts = settings.allowedHosts.filter((entry) => entry !== host);
       await browser.storage.local.set({ allowedHosts: settings.allowedHosts });
-      if (host === currentHost) {
+      await refreshBackgroundSettings();
+      if (removedCurrentHost) {
+        await reloadCurrentTab({ restoreOriginal: true });
         showStatus(`Disabled rewriting on ${host}.`);
       } else {
         showStatus(`Removed ${host} from enabled sites.`);
@@ -533,6 +540,8 @@ function shortUrl(url) {
 async function getCurrentTabHost() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   currentTabId = Number.isInteger(tab?.id) ? tab.id : null;
+  currentTabIsReader = false;
+  currentOriginalUrl = "";
   if (!tab || !tab.url) {
     return "";
   }
@@ -540,25 +549,43 @@ async function getCurrentTabHost() {
     const url = new URL(tab.url);
     if (url.protocol === "moz-extension:" && url.pathname.endsWith("/reader.html")) {
       const sourceUrl = new URL(url.searchParams.get("url") || "");
+      if (sourceUrl.protocol !== "http:" && sourceUrl.protocol !== "https:") {
+        return "";
+      }
+      currentTabIsReader = true;
+      currentOriginalUrl = sourceUrl.href;
       return sourceUrl.hostname.toLowerCase();
     }
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       return "";
     }
+    currentOriginalUrl = url.href;
     return url.hostname.toLowerCase();
   } catch (error) {
     return "";
   }
 }
 
-async function reloadCurrentTab() {
+async function reloadCurrentTab({ restoreOriginal = false } = {}) {
   if (!Number.isInteger(currentTabId)) {
     return;
   }
   try {
+    if (restoreOriginal && currentTabIsReader && currentOriginalUrl) {
+      await browser.tabs.update(currentTabId, { url: currentOriginalUrl });
+      return;
+    }
     await browser.tabs.reload(currentTabId);
   } catch (error) {
     console.warn("zappa tab reload failed", error);
+  }
+}
+
+async function refreshBackgroundSettings() {
+  try {
+    await browser.runtime.sendMessage({ type: "zappa-refresh-settings" });
+  } catch (error) {
+    console.warn("zappa settings refresh message failed", error);
   }
 }
 
