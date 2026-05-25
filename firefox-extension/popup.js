@@ -368,6 +368,7 @@ function formatTimingSummary(timings) {
   const labels = [
     ["captureMs", "cap"],
     ["reduceMs", "reduce"],
+    ["firstShellWriteMs", "shell"],
     ["backendHeadersMs", "headers"],
     ["firstSseMs", "first"],
     ["backendMs", "backend"],

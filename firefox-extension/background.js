@@ -447,6 +447,8 @@ browser.webRequest.onBeforeRequest.addListener(
     filter.onstop = async () => {
       let bodyBytes = new Uint8Array();
       let streamedResponse = false;
+      let readerDocumentStarted = false;
+      let realStreamContentStarted = false;
       let streamedContentChars = 0;
       try {
         bodyBytes = concatChunks(chunks);
@@ -493,9 +495,29 @@ browser.webRequest.onBeforeRequest.addListener(
           startedAt: context.startedAt,
           timings: context.timings,
           signal: createRequestAbortSignal(context),
+          onStreamStart: () => {
+            if (readerDocumentStarted) {
+              return true;
+            }
+            const shell = buildReaderDocumentStart("Zappa Rewrite") + buildReaderLoadingBlock();
+            streamedResponse = true;
+            readerDocumentStarted = true;
+            streamedContentChars += shell.length;
+            filter.write(new TextEncoder().encode(shell));
+            return true;
+          },
           onStreamHtml: (html) => {
             const writeStartedAt = Date.now();
             streamedResponse = true;
+            if (!readerDocumentStarted) {
+              readerDocumentStarted = true;
+            }
+            if (!realStreamContentStarted && html && html !== buildReaderDocumentEnd()) {
+              const loadingDoneStyle = buildReaderLoadingDoneStyle();
+              streamedContentChars += loadingDoneStyle.length;
+              filter.write(new TextEncoder().encode(loadingDoneStyle));
+              realStreamContentStarted = true;
+            }
             streamedContentChars += html.length;
             filter.write(new TextEncoder().encode(html));
             context.timings.renderWriteMs = (context.timings.renderWriteMs || 0) + (Date.now() - writeStartedAt);
@@ -586,7 +608,7 @@ browser.webRequest.onBeforeRequest.addListener(
         });
         const errorBody = buildErrorBody(context.assetKind, stringifyError(error));
         if (streamedResponse) {
-          filter.write(new TextEncoder().encode(`<hr><p><strong>Rewrite failed:</strong> ${escapeHtml(stringifyError(error))}</p></main></body></html>`));
+          filter.write(new TextEncoder().encode(`${buildReaderLoadingDoneStyle()}<hr><p><strong>Rewrite failed:</strong> ${escapeHtml(stringifyError(error))}</p></main></body></html>`));
         } else {
           filter.write(new TextEncoder().encode(errorBody));
         }
@@ -1029,7 +1051,7 @@ function stringifyError(error) {
   return String(error);
 }
 
-async function rewriteAsset({ url, host, assetKind, contentType, source, requestId, startedAt, timings, signal, onStreamHtml }) {
+async function rewriteAsset({ url, host, assetKind, contentType, source, requestId, startedAt, timings, signal, onStreamStart, onStreamHtml }) {
   const reduceStartedAt = Date.now();
   const modelSource = prepareSourceForModel(assetKind, source, url);
   timings.reduceMs = Date.now() - reduceStartedAt;
@@ -1054,7 +1076,20 @@ async function rewriteAsset({ url, host, assetKind, contentType, source, request
     timings,
     startedAt
   });
-  return rewriteWithOpenAICompatible({ url, assetKind, contentType, source: modelSource, timings, signal, onStreamHtml });
+  const readerDocumentStarted = Boolean(onStreamStart && assetKind === "html" && onStreamStart());
+  if (readerDocumentStarted && !timings.firstShellWriteMs) {
+    timings.firstShellWriteMs = Date.now() - startedAt;
+  }
+  return rewriteWithOpenAICompatible({
+    url,
+    assetKind,
+    contentType,
+    source: modelSource,
+    timings,
+    signal,
+    readerDocumentStarted,
+    onStreamHtml
+  });
 }
 
 function prepareSourceForModel(assetKind, source, url = "") {
@@ -1597,7 +1632,7 @@ function htmlToPlainText(html) {
   return String(html || "").replace(/<[^>]*>/g, " ");
 }
 
-async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source, timings, signal, onStreamHtml }) {
+async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source, timings, signal, readerDocumentStarted = false, onStreamHtml }) {
   const headers = {
     "Content-Type": "application/json"
   };
@@ -1630,7 +1665,7 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
 
   const responseContentType = response.headers.get("content-type") || "";
   if (payload.stream && response.body && responseContentType.includes("text/event-stream")) {
-    return streamChatCompletionToHtml(response, url, timings, signal, onStreamHtml);
+    return streamChatCompletionToHtml(response, url, timings, signal, onStreamHtml, { readerDocumentStarted });
   }
 
   const responseText = await response.text();
@@ -1654,7 +1689,7 @@ async function rewriteWithOpenAICompatible({ url, assetKind, contentType, source
   return renderModelOutput(parsed, url);
 }
 
-async function streamChatCompletionToHtml(response, pageUrl, timings, signal, onStreamHtml) {
+async function streamChatCompletionToHtml(response, pageUrl, timings, signal, onStreamHtml, { readerDocumentStarted = false } = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const contentExtractor = createJsonContentExtractor((markdownDelta) => {
@@ -1664,7 +1699,7 @@ async function streamChatCompletionToHtml(response, pageUrl, timings, signal, on
     if (!streamStarted) {
       streamStarted = true;
       timings.firstRenderMs = Date.now() - backendStartedAt;
-      onStreamHtml(buildReaderDocumentStart("Zappa Rewrite"));
+      ensureReaderDocumentStarted();
     }
     const renderStartedAt = Date.now();
     onStreamHtml(sanitizeRenderedHtml(html, pageUrl));
@@ -1674,6 +1709,17 @@ async function streamChatCompletionToHtml(response, pageUrl, timings, signal, on
   let sseBuffer = "";
   let rawModelText = "";
   const backendStartedAt = timings.backendStartedAt || Date.now();
+
+  function ensureReaderDocumentStarted() {
+    if (readerDocumentStarted) {
+      return;
+    }
+    readerDocumentStarted = true;
+    if (!timings.firstShellWriteMs) {
+      timings.firstShellWriteMs = Date.now() - backendStartedAt;
+    }
+    onStreamHtml(buildReaderDocumentStart("Zappa Rewrite"));
+  }
 
   while (true) {
     if (signal?.aborted) {
@@ -1728,7 +1774,7 @@ async function streamChatCompletionToHtml(response, pageUrl, timings, signal, on
   timings.backendMs = Date.now() - backendStartedAt;
   if (!streamStarted) {
     streamStarted = true;
-    onStreamHtml(buildReaderDocumentStart("Zappa Rewrite"));
+    ensureReaderDocumentStarted();
   }
   if (finalHtml) {
     onStreamHtml(sanitizeRenderedHtml(finalHtml, pageUrl));
@@ -1801,6 +1847,14 @@ function buildReaderDocumentStart(title) {
 
 function buildReaderDocumentEnd() {
   return "</main></body></html>";
+}
+
+function buildReaderLoadingBlock() {
+  return "<p class=\"zappa-loading\">Rewriting...</p>";
+}
+
+function buildReaderLoadingDoneStyle() {
+  return "<style>.zappa-loading{display:none!important;}</style>";
 }
 
 function createJsonContentExtractor(onContent) {
