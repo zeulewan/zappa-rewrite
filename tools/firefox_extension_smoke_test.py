@@ -139,9 +139,8 @@ class MockPiBridgeHandler(http.server.BaseHTTPRequestHandler):
 
 Inline safe media: <figure><img src="http://127.0.0.1:18080/images/inline-safe.jpg" alt="Inline safe image" width="465" loading="eager"/><figcaption>Inline figure caption.</figcaption></figure>
 
-Navigation | Links
---- | ---
-Top | [News](http://127.0.0.1:18080/news) · [Sport](http://127.0.0.1:18080/sport)
+| [News](http://127.0.0.1:18080/news) | [In focus](http://127.0.0.1:18080/focus) | [Sport](http://127.0.0.1:18080/sport) |
+| --- | --- | --- |
 
 Useful article text survives the reducer.
 
@@ -547,8 +546,21 @@ def main() -> None:
                 table_text = driver.execute_script(
                     "return document.querySelector('main.zappa-reader table')?.innerText || ''"
                 )
-                if "Navigation" not in table_text or "News" not in table_text or "Sport" not in table_text:
-                    raise RuntimeError(f"markdown table did not render: {table_text!r}")
+                table_links = driver.execute_script(
+                    """
+                    return Array.from(document.querySelectorAll('main.zappa-reader table a')).map((link) => ({
+                      text: link.textContent,
+                      href: link.href
+                    }));
+                    """
+                )
+                expected_table_links = [
+                    {"text": "News", "href": "http://127.0.0.1:18080/news"},
+                    {"text": "In focus", "href": "http://127.0.0.1:18080/focus"},
+                    {"text": "Sport", "href": "http://127.0.0.1:18080/sport"},
+                ]
+                if table_links != expected_table_links:
+                    raise RuntimeError(f"horizontal markdown menu table did not render: text={table_text!r} links={table_links!r}")
                 if 'src="zappa-image-' not in MockPiBridgeHandler.last_source:
                     raise RuntimeError(f"expected model source to use image placeholders: {MockPiBridgeHandler.last_source[:1000]!r}")
                 assert_reduced_source(MockPiBridgeHandler.last_source)

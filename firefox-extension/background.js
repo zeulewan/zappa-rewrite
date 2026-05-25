@@ -326,7 +326,8 @@ Structure standard:
 - Keep the source page's high-level order: useful site/header navigation, main content, then related or supporting content.
 - Article pages should use: title, standfirst/subhead if present, byline/date if present, hero figure if useful, then the article body in source order.
 - Section/front pages should use: page or section title, useful navigation, then source sections as headings with compact lists or tables.
-- Navigation/menu bars should be reproduced as compact Markdown pipe tables of links, preserving labels and order. Prefer tables over a long vertical bullet list for horizontal menus.
+- Top navigation/menu bars should be reproduced as a horizontal Markdown pipe table, not a two-column "Section | Link" table. Each cell should be the actual visible label as the link text, such as [News](/news), [In focus](/in-focus), [Sport](/sport). Do not duplicate the same label in adjacent columns.
+- For horizontal menus, prefer this shape: | [News](/news) | [In focus](/in-focus) | [Sport](/sport) | followed by | --- | --- | --- |. Preserve source label order.
 - Do not summarize or truncate core article/listing content unless the source itself is a summary.
 
 Output rules:
