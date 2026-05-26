@@ -28,9 +28,27 @@ def main() -> None:
         / "Views"
         / "BrowserViewController.swift"
     )
+    toolbar_middleware = (
+        client_root
+        / "Frontend"
+        / "Browser"
+        / "Toolbars"
+        / "Redux"
+        / "ToolbarMiddleware.swift"
+    )
+    address_bar_state = (
+        client_root
+        / "Frontend"
+        / "Browser"
+        / "Toolbars"
+        / "Redux"
+        / "AddressBarState.swift"
+    )
 
     require(project_path)
     require(browser_view_controller)
+    require(toolbar_middleware)
+    require(address_bar_state)
     zappa_root.mkdir(parents=True, exist_ok=True)
 
     swift_files: list[Path] = []
@@ -44,6 +62,8 @@ def main() -> None:
         swift_files.append(destination)
 
     patch_browser_view_controller(browser_view_controller)
+    patch_toolbar_middleware(toolbar_middleware)
+    patch_address_bar_state(address_bar_state)
     patch_project(project_path, swift_files, firefox_root)
 
     print(f"Applied Zappa overlay to {worktree}")
@@ -71,6 +91,83 @@ def patch_browser_view_controller(path: Path) -> None:
             raise SystemExit("could not find BrowserViewController.viewDidLayoutSubviews hook")
         text = text.replace(layout_needle, layout_replacement, 1)
 
+    path.write_text(text)
+
+
+def patch_toolbar_middleware(path: Path) -> None:
+    text = path.read_text()
+    if "ZappaRewriteRequested" in text:
+        return
+
+    if "import Foundation\n" not in text:
+        text = text.replace("import Common\n", "import Common\nimport Foundation\n", 1)
+
+    tap_needle = """        case .summarizer:
+            Task { @MainActor in
+                guard let webView = windowManager.tabManager(for: action.windowUUID).selectedTab?.webView else { return }
+                let summarizerConfig = await summarizerConfigFactory.makeConfiguration(from: webView)
+                let action = GeneralBrowserAction(summarizerConfig: summarizerConfig,
+                                                  summarizerTrigger: .toolbarIcon,
+                                                  windowUUID: action.windowUUID,
+                                                  actionType: GeneralBrowserActionType.showSummarizer)
+                store.dispatch(action)
+            }
+        case .translate:
+"""
+    tap_replacement = """        case .summarizer:
+            NotificationCenter.default.post(name: Notification.Name("ZappaRewriteRequested"), object: nil)
+        case .translate:
+"""
+    if tap_needle not in text:
+        raise SystemExit("could not find toolbar summarizer tap handler")
+    text = text.replace(tap_needle, tap_replacement, 1)
+
+    long_press_needle = """        case .summarizer:
+            let action = GeneralBrowserAction(windowUUID: action.windowUUID,
+                                              actionType: GeneralBrowserActionType.showReaderMode)
+            store.dispatch(action)
+        case .readerModeWithSummarizer:
+"""
+    long_press_replacement = """        case .summarizer:
+            NotificationCenter.default.post(name: Notification.Name("ZappaRewriteRequested"), object: nil)
+        case .readerModeWithSummarizer:
+"""
+    if long_press_needle not in text:
+        raise SystemExit("could not find toolbar summarizer long-press handler")
+    text = text.replace(long_press_needle, long_press_replacement, 1)
+
+    path.write_text(text)
+
+
+def patch_address_bar_state(path: Path) -> None:
+    text = path.read_text()
+    if 'actionLabel: "Z"' in text and 'a11yLabel: "Rewrite with Zappa"' in text:
+        return
+
+    needle = """    private static func summaryAction(hasAlternativeLocationColor: Bool) -> ToolbarActionConfiguration {
+        return ToolbarActionConfiguration(
+            actionType: .summarizer,
+            iconName: StandardImageIdentifiers.Medium.lightning,
+            isEnabled: true,
+            hasCustomColor: !hasAlternativeLocationColor,
+            contextualHintType: ContextualHintType.summarizeToolbarEntry.rawValue,
+            a11yLabel: .Toolbars.SummarizeButtonAccessibilityLabel,
+            a11yId: AccessibilityIdentifiers.Toolbar.summarizeButton)
+    }
+"""
+    replacement = """    private static func summaryAction(hasAlternativeLocationColor: Bool) -> ToolbarActionConfiguration {
+        return ToolbarActionConfiguration(
+            actionType: .summarizer,
+            actionLabel: "Z",
+            isEnabled: true,
+            hasCustomColor: !hasAlternativeLocationColor,
+            a11yLabel: "Rewrite with Zappa",
+            a11yId: "zappa.rewrite.toolbarButton")
+    }
+"""
+    if needle not in text:
+        raise SystemExit("could not find address bar summarizer action")
+    text = text.replace(needle, replacement, 1)
     path.write_text(text)
 
 

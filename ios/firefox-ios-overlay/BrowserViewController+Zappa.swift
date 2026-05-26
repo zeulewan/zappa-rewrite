@@ -10,6 +10,10 @@ private enum ZappaAssociationKeys {
     nonisolated(unsafe) static let coordinator: UnsafeRawPointer = UnsafeRawPointer(bitPattern: 0x7A_61_70_70_61)!
 }
 
+private extension Notification.Name {
+    static let zappaRewriteRequested = Notification.Name("ZappaRewriteRequested")
+}
+
 extension BrowserViewController {
     private enum ZappaDefaults {
         static let apiKey = "zappa_api_key"
@@ -21,51 +25,19 @@ extension BrowserViewController {
         guard !AppConstants.isRunningUnitTest else {
             return
         }
-        guard view.viewWithTag(Self.zappaRewriteButtonTag) == nil else {
-            return
-        }
-
-        let button = UIButton(type: .system)
-        button.tag = Self.zappaRewriteButtonTag
-        button.setTitle("Z", for: .normal)
-        button.titleLabel?.font = .boldSystemFont(ofSize: 17)
-        button.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.92)
-        button.tintColor = .label
-        button.layer.cornerRadius = 22
-        button.layer.borderWidth = 1
-        button.layer.borderColor = UIColor.separator.cgColor
-        button.layer.shadowColor = UIColor.black.cgColor
-        button.layer.shadowOpacity = 0.15
-        button.layer.shadowRadius = 8
-        button.layer.shadowOffset = CGSize(width: 0, height: 2)
-        button.layer.zPosition = 10_000
-        button.accessibilityLabel = "Rewrite with Zappa"
-        button.accessibilityIdentifier = "zappa.rewrite.button"
-        button.addTarget(self, action: #selector(zappaRewriteSelectedTab), for: .touchUpInside)
-        button.translatesAutoresizingMaskIntoConstraints = false
-
-        view.addSubview(button)
-        NSLayoutConstraint.activate([
-            button.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -18),
-            button.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -86),
-            button.widthAnchor.constraint(equalToConstant: 44),
-            button.heightAnchor.constraint(equalToConstant: 44)
-        ])
-        raiseZappaRewriteButton()
-        DispatchQueue.main.async { [weak self] in
-            self?.raiseZappaRewriteButton()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.raiseZappaRewriteButton()
-        }
-        zappaLogger.info("Installed Zappa rewrite button")
+        view.viewWithTag(Self.zappaRewriteButtonTag)?.removeFromSuperview()
+        NotificationCenter.default.removeObserver(self, name: .zappaRewriteRequested, object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(zappaRewriteSelectedTab),
+            name: .zappaRewriteRequested,
+            object: nil
+        )
+        zappaLogger.info("Installed Zappa toolbar rewrite handler")
     }
 
     func raiseZappaRewriteButton() {
-        guard let button = view.viewWithTag(Self.zappaRewriteButtonTag) else {
-            return
-        }
-        view.bringSubviewToFront(button)
+        view.viewWithTag(Self.zappaRewriteButtonTag)?.removeFromSuperview()
     }
 
     @objc

@@ -83,6 +83,21 @@ class NormalizeModelOutputTests(unittest.TestCase):
         )
 
 
+class BuildPiPromptTests(unittest.TestCase):
+    def test_omits_client_system_messages(self) -> None:
+        prompt = pi_codex_bridge.build_pi_prompt(
+            [
+                {"role": "system", "content": "You rewrite web pages for direct browser use."},
+                {"role": "user", "content": '{"url":"https://example.com","source":"<html>OK</html>"}'},
+            ]
+        )
+
+        self.assertNotIn("You rewrite web pages", prompt)
+        self.assertNotIn("SYSTEM:", prompt)
+        self.assertIn("USER:", prompt)
+        self.assertIn("https://example.com", prompt)
+
+
 class RunPiRewriteTests(unittest.TestCase):
     def test_passes_prompt_by_file_and_cleans_up(self) -> None:
         large_source = "x" * 200_000
