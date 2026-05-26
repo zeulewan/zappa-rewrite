@@ -1,9 +1,10 @@
 import Foundation
+import OSLog
 
-public final class ZappaBridgeClient {
+private let zappaBridgeLogger = Logger(subsystem: "ZappaRewrite", category: "BridgeClient")
+
+public final class ZappaBridgeClient: @unchecked Sendable {
     private let session: URLSession
-    private let jsonEncoder = JSONEncoder()
-    private let jsonDecoder = JSONDecoder()
 
     public init(session: URLSession = .shared) {
         self.session = session
@@ -14,7 +15,7 @@ public final class ZappaBridgeClient {
         config: ZappaConfig
     ) async throws -> ZappaRewriteResult {
         let responseText = try await performCompletionRequest(request, config: config, stream: false)
-        let response = try jsonDecoder.decode(ChatCompletionResponse.self, from: Data(responseText.utf8))
+        let response = try JSONDecoder().decode(ChatCompletionResponse.self, from: Data(responseText.utf8))
         guard let content = response.choices.first?.message.content, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ZappaBridgeError.emptyResponse
         }
@@ -58,8 +59,10 @@ public final class ZappaBridgeClient {
         stream: Bool
     ) async throws -> String {
         let urlRequest = try makeCompletionURLRequest(request, config: config, stream: stream)
+        zappaBridgeLogger.info("POST \(urlRequest.url?.absoluteString ?? "", privacy: .public) stream=\(stream, privacy: .public)")
         let (data, response) = try await session.data(for: urlRequest)
         try validateHTTPResponse(response)
+        zappaBridgeLogger.info("Bridge response bytes=\(data.count, privacy: .public)")
         guard let text = String(data: data, encoding: .utf8) else {
             throw ZappaBridgeError.invalidUTF8
         }
@@ -87,7 +90,8 @@ public final class ZappaBridgeClient {
             contentType: request.contentType,
             source: source
         )
-        let userPayloadData = try jsonEncoder.encode(userPayload)
+        let encoder = JSONEncoder()
+        let userPayloadData = try encoder.encode(userPayload)
         let userPayloadText = String(data: userPayloadData, encoding: .utf8) ?? "{}"
         let payload = ChatCompletionRequest(
             model: config.model,
@@ -99,7 +103,7 @@ public final class ZappaBridgeClient {
                 ChatMessage(role: "user", content: userPayloadText)
             ]
         )
-        urlRequest.httpBody = try jsonEncoder.encode(payload)
+        urlRequest.httpBody = try encoder.encode(payload)
         return urlRequest
     }
 
@@ -107,6 +111,7 @@ public final class ZappaBridgeClient {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ZappaBridgeError.invalidHTTPResponse
         }
+        zappaBridgeLogger.info("Bridge HTTP status \(httpResponse.statusCode, privacy: .public)")
         guard (200..<300).contains(httpResponse.statusCode) else {
             throw ZappaBridgeError.httpStatus(httpResponse.statusCode)
         }
@@ -131,7 +136,7 @@ public final class ZappaBridgeClient {
         if dataText == "[DONE]" {
             return
         }
-        let chunk = try jsonDecoder.decode(ChatCompletionStreamChunk.self, from: Data(dataText.utf8))
+        let chunk = try JSONDecoder().decode(ChatCompletionStreamChunk.self, from: Data(dataText.utf8))
         if let error = chunk.error {
             throw ZappaBridgeError.backend(error)
         }
@@ -145,7 +150,7 @@ public final class ZappaBridgeClient {
         guard let data = trimmed.data(using: .utf8) else {
             throw ZappaBridgeError.invalidUTF8
         }
-        if let envelope = try? jsonDecoder.decode(ModelRewriteEnvelope.self, from: data) {
+        if let envelope = try? JSONDecoder().decode(ModelRewriteEnvelope.self, from: data) {
             return ZappaRewriteResult(
                 title: envelope.title ?? "",
                 markdown: envelope.content,
